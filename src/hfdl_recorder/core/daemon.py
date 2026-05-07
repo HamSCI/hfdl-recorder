@@ -19,6 +19,7 @@ from hfdl_recorder.config import (
     resolve_radiod_status,
 )
 from hfdl_recorder.core.band_pipeline import BandPipeline
+from hfdl_recorder.core.ch_tailer import ChTailer
 from hfdl_recorder.core.radiod import (
     HFDL_ENCODING,
     HFDL_PRESET,
@@ -37,6 +38,7 @@ class HfdlRecorder:
 
         self._pipelines: list[BandPipeline] = []
         self._multi_streams: list = []
+        self._ch_tailers: list[ChTailer] = []
         self._control = None
         self._running = False
 
@@ -129,6 +131,55 @@ class HfdlRecorder:
                 multi.start()
             except Exception:
                 logger.exception("Failed to start MultiStream")
+        self._start_ch_tailers()
+
+    def _start_ch_tailers(self) -> None:
+        """Start one ChTailer per enabled band — CONTRACT v0.6 §17.
+
+        Each tailer watches the per-band JSON spool dumphfdl writes
+        and inserts parsed frames into `hfdl.spots`.  No-op when
+        SIGMOND_CLICKHOUSE_URL is unset.  Failure to import / start is
+        non-fatal: dumphfdl's own outputs (local JSON, optional
+        airframes.io TCP) are unaffected.
+        """
+        from pathlib import Path as _Path
+        paths = self._config.get("paths", {})
+        spool_dir = _Path(paths.get("spool_dir", "/var/lib/hfdl-recorder"))
+        station = self._config.get("station", {})
+        host_call = station.get("call") or station.get("station_id") or ""
+        host_grid = station.get("grid_square") or station.get("grid") or ""
+
+        try:
+            from hfdl_recorder.version import GIT_INFO
+            short = (GIT_INFO or {}).get("short", "")
+        except Exception:
+            short = ""
+        try:
+            from importlib.metadata import version as pkg_version
+            ver = pkg_version("hfdl-recorder")
+        except Exception:
+            ver = "0.1.0"
+        proc_version = f"{ver}+{short}" if short else ver
+
+        for pipeline in self._pipelines:
+            band_name = pipeline.name
+            json_path = spool_dir / self._radiod_id / f"{band_name}.json"
+            try:
+                tailer = ChTailer(
+                    json_path=json_path,
+                    band_name=band_name,
+                    radiod_id=self._radiod_id,
+                    host_call=host_call,
+                    host_grid=host_grid,
+                    processing_version=proc_version,
+                )
+                tailer.start()
+                self._ch_tailers.append(tailer)
+            except Exception:
+                logger.exception(
+                    "ch_tailer band=%s startup failed; dumphfdl outputs unaffected",
+                    band_name,
+                )
 
     # -- systemd integration --
 
@@ -175,6 +226,11 @@ class HfdlRecorder:
 
     def _shutdown(self) -> None:
         logger.info("Shutting down...")
+        for tailer in self._ch_tailers:
+            try:
+                tailer.stop()
+            except Exception:
+                logger.exception("Error stopping ch_tailer")
         for multi in self._multi_streams:
             try:
                 multi.stop()

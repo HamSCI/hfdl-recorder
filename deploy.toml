@@ -1,7 +1,7 @@
 [package]
 name             = "hfdl-recorder"
 version          = "0.1.0"
-contract_version = "0.4"
+contract_version = "0.6"
 license          = "MIT"
 
 # Configuration interview (CONTRACT-v0.5 §14).  Sigmond invokes
@@ -57,6 +57,20 @@ mode  = "0755"
 [systemd]
 units = []
 templated_units = ["hfdl-recorder@.service"]
+
+# CONTRACT v0.6 §17 — local ClickHouse sink for `hfdl.spots`.  Schema is
+# greenfield (this repo).  When sigmond publishes SIGMOND_CLICKHOUSE_URL,
+# an in-process tailer thread parses the JSON-per-line file dumphfdl
+# writes at `/var/lib/hfdl-recorder/<radiod_id>/<band>.json` and inserts
+# rows into hfdl.spots.  CH-disabled hosts stay file-only with no extra
+# moving parts, and dumphfdl's optional airframes.io TCP feed (via its
+# own --output spec) is unaffected — the CH path tails the local file,
+# not the TCP socket.
+[clickhouse]
+database         = "hfdl"
+schema_dir       = "clickhouse/schema/hfdl"
+schema_version   = 1
+required_min_ch  = "23.8"
 
 [deps]
 [[deps.binary]]

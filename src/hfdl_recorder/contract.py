@@ -1,4 +1,4 @@
-"""Client-contract v0.4 inventory and validate JSON builders."""
+"""Client-contract v0.6 inventory and validate JSON builders."""
 
 from __future__ import annotations
 
@@ -20,11 +20,11 @@ from hfdl_recorder.version import GIT_INFO
 
 logger = logging.getLogger(__name__)
 
-CONTRACT_VERSION = "0.4"
+CONTRACT_VERSION = "0.6"
 
 
 def build_inventory(config: dict, config_path: Path) -> dict:
-    """Build the inventory --json payload per contract v0.4."""
+    """Build the inventory --json payload per contract v0.6."""
     paths = config.get("paths", {})
     sinks = config.get("sinks", {})
     log_dir = paths.get("log_dir", "/var/log/hfdl-recorder")
@@ -65,6 +65,37 @@ def build_inventory(config: dict, config_path: Path) -> dict:
         # of the sigmond contract surface.
         frequencies_hz = sorted(b.center_hz for b in bands)
 
+        # CONTRACT v0.6 §17 — output sinks per instance.  Local JSON files
+        # are always declared (canonical artifact dumphfdl writes); a
+        # clickhouse sink is added when sigmond has published
+        # SIGMOND_CLICKHOUSE_URL into the env (CH-disabled hosts stay
+        # file-only with no extra moving parts).
+        data_sinks: list[dict[str, Any]] = [
+            {
+                "kind":           "file",
+                "target":         f"{spool_dir}/{radiod_id}",
+                "schema_ref":     None,
+                "retention_days": 0,
+                "mb_per_day":     _estimate_json_mb_per_day(bands),
+            },
+            {
+                "kind":           "file",
+                "target":         log_dir,
+                "schema_ref":     None,
+                "retention_days": 365,
+                "mb_per_day":     5,
+            },
+        ]
+        if os.environ.get("SIGMOND_CLICKHOUSE_URL", "").strip():
+            data_sinks.append({
+                "kind":           "clickhouse",
+                "target":         "hfdl.spots",
+                "schema_ref":     "hfdl:1",
+                "retention_days": 14,
+                "mb_per_day":     max(1, len(list(bands))),
+                "health":         "ok",
+            })
+
         instance = {
             "instance": radiod_id,
             "radiod_id": radiod_id,
@@ -78,18 +109,7 @@ def build_inventory(config: dict, config_path: Path) -> dict:
             "frequencies_hz": frequencies_hz,
             "modes": ["hfdl"] if bands else [],
             "bands": [b.name for b in bands],
-            "disk_writes": [
-                {
-                    "path": f"{spool_dir}/{radiod_id}",
-                    "mb_per_day": _estimate_json_mb_per_day(bands),
-                    "retention_days": 0,  # logrotate-managed, not bounded by us
-                },
-                {
-                    "path": log_dir,
-                    "mb_per_day": 5,
-                    "retention_days": 365,
-                },
-            ],
+            "data_sinks": data_sinks,
             "uses_timing_calibration": False,
             "provides_timing_calibration": False,
             "chain_delay_ns_applied": chain_delay,

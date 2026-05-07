@@ -1,4 +1,4 @@
-"""Tests for contract v0.4 inventory/validate JSON builders."""
+"""Tests for contract v0.6 inventory/validate JSON builders."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from hfdl_recorder.contract import (
 FIXTURE = Path(__file__).parent / "fixtures" / "test-config.toml"
 
 
-def test_contract_version_is_0_4():
-    assert CONTRACT_VERSION == "0.4"
+def test_contract_version_is_0_6():
+    assert CONTRACT_VERSION == "0.6"
 
 
 def test_inventory_required_top_level_keys():
@@ -27,7 +27,7 @@ def test_inventory_required_top_level_keys():
     ):
         assert key in inv, f"missing top-level inventory key: {key}"
     assert inv["client"] == "hfdl-recorder"
-    assert inv["contract_version"] == "0.4"
+    assert inv["contract_version"] == "0.6"
 
 
 def test_inventory_instance_shape():
@@ -44,6 +44,34 @@ def test_inventory_instance_shape():
     assert inst["frequencies_hz"] == sorted(inst["frequencies_hz"])
     assert inst["data_destination"] is None  # contract §7
     assert inst["uses_timing_calibration"] is False
+
+
+def test_inventory_data_sinks_v0_6(monkeypatch):
+    """CONTRACT v0.6 §17.3: every instance has a data_sinks array.
+
+    File sinks are always declared; the CH sink only appears when
+    SIGMOND_CLICKHOUSE_URL is set.
+    """
+    monkeypatch.delenv("SIGMOND_CLICKHOUSE_URL", raising=False)
+    cfg = load_config(FIXTURE)
+    inv = build_inventory(cfg, FIXTURE)
+    inst = inv["instances"][0]
+    assert "data_sinks" in inst
+    kinds = {s["kind"] for s in inst["data_sinks"]}
+    assert "file" in kinds
+    assert "clickhouse" not in kinds
+    for sink in inst["data_sinks"]:
+        for required in ("kind", "target", "retention_days", "mb_per_day"):
+            assert required in sink, f"sink missing {required}"
+
+    # With CH configured, the clickhouse sink appears.
+    monkeypatch.setenv("SIGMOND_CLICKHOUSE_URL", "http://localhost:8123")
+    inv = build_inventory(cfg, FIXTURE)
+    inst = inv["instances"][0]
+    ch = [s for s in inst["data_sinks"] if s["kind"] == "clickhouse"]
+    assert len(ch) == 1
+    assert ch[0]["target"] == "hfdl.spots"
+    assert ch[0]["schema_ref"] == "hfdl:1"
 
 
 def test_validate_passes_with_fixture():
