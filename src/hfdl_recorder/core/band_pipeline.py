@@ -69,13 +69,15 @@ class BandPipeline:
     def band(self) -> HfdlBand:
         return self._band
 
-    def attach(self, multi) -> None:
+    def attach(self, multi, lifetime: int | None = None) -> int:
         """Register our band as a channel in the shared MultiStream.
 
         Caller is responsible for ``multi.start()`` after all bands attach.
+        Returns the SSRC so the daemon can register it for LIFETIME
+        keep-alive refreshes.
         """
         self._multi = multi
-        multi.add_channel(
+        info = multi.add_channel(
             frequency_hz=float(self._band.center_hz),
             preset=HFDL_PRESET,
             sample_rate=self._band.samprate_hz,
@@ -83,7 +85,9 @@ class BandPipeline:
             on_samples=self._on_samples,
             on_stream_dropped=self._on_stream_dropped,
             on_stream_restored=self._on_stream_restored,
+            lifetime=lifetime,
         )
+        return info.ssrc
 
     def start(self) -> None:
         """Open the per-band log and launch the supervisor thread."""

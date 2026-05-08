@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import threading
 import time
 
 from hfdl_recorder.config import (
@@ -38,9 +39,21 @@ class HfdlRecorder:
 
         self._pipelines: list[BandPipeline] = []
         self._multi_streams: list = []
+        # (MultiStream, ssrc) pairs for LIFETIME keep-alive — populated
+        # at provisioning, consumed by the lifetime thread.
+        self._lifetime_entries: list[tuple[object, int]] = []
         self._ch_tailers: list[ChTailer] = []
         self._control = None
         self._running = False
+
+        # radiod LIFETIME tag (ka9q-python ≥3.13.0).  0 = no LIFETIME
+        # tag sent + no keep-alive; >0 = self-destruct after N frames,
+        # refreshed at frames/4 cadence while we're alive.
+        proc = config.get("processing", {})
+        self._radiod_lifetime_frames: int = int(
+            proc.get("radiod_lifetime_frames", 0)
+        )
+        self._lifetime_thread: threading.Thread | None = None
 
     def run(self) -> None:
         self._running = True
@@ -50,6 +63,7 @@ class HfdlRecorder:
         try:
             self._provision()
             self._start()
+            self._start_lifetime_keepalive()
             self._notify_ready()
             self._main_loop()
         except Exception:
@@ -73,6 +87,13 @@ class HfdlRecorder:
                 f"No HFDL bands enabled for radiod {self._radiod_id!r}"
             )
 
+        # `lifetime=None` when configured to 0 — distinguishes "no
+        # LIFETIME tag at all" from "finite N frames".
+        lifetime_arg = (
+            self._radiod_lifetime_frames
+            if self._radiod_lifetime_frames > 0 else None
+        )
+
         multi_by_group: dict[tuple, object] = {}
 
         for band in bands:
@@ -87,6 +108,7 @@ class HfdlRecorder:
                 agc_enable=0,
                 gain=0.0,
                 encoding=HFDL_ENCODING,
+                lifetime=lifetime_arg,
             )
             # The "iq" preset's default channel filter is ±5 kHz — sized
             # for narrowband audio, not an HFDL band. Without this call,
@@ -111,7 +133,9 @@ class HfdlRecorder:
                 radiod_id=self._radiod_id,
                 config=self._config,
             )
-            pipeline.attach(multi)
+            ssrc = pipeline.attach(multi, lifetime=lifetime_arg)
+            if lifetime_arg is not None:
+                self._lifetime_entries.append((multi, ssrc))
             self._pipelines.append(pipeline)
 
         self._multi_streams = list(multi_by_group.values())
@@ -180,6 +204,51 @@ class HfdlRecorder:
                     "ch_tailer band=%s startup failed; dumphfdl outputs unaffected",
                     band_name,
                 )
+
+    # -- LIFETIME keep-alive --
+
+    def _start_lifetime_keepalive(self) -> None:
+        """Refresh radiod's LIFETIME on every active SSRC at frames/4 cadence.
+
+        No-op when radiod_lifetime_frames is 0 or no channels opted in.
+        Failure to refresh (network blip, radiod restart) must not crash
+        the daemon — log and continue; MultiStream's drop/restore path
+        re-applies the slot's lifetime when reception resumes.
+        """
+        if not self._lifetime_entries:
+            return
+        # Refresh every quarter of the lifetime — gives 4× safety
+        # margin against radiod self-destruct if a single refresh is
+        # missed.  Floor at 1 s so absurd configs don't busy-loop.
+        interval = max(self._radiod_lifetime_frames / 50.0 / 4.0, 1.0)
+        logger.info(
+            "lifetime keepalive: %d channels, %d frames, refresh every %.1fs",
+            len(self._lifetime_entries),
+            self._radiod_lifetime_frames,
+            interval,
+        )
+        self._lifetime_thread = threading.Thread(
+            target=self._lifetime_loop,
+            args=(interval,),
+            daemon=True,
+            name="lifetime",
+        )
+        self._lifetime_thread.start()
+
+    def _lifetime_loop(self, interval_sec: float) -> None:
+        while self._running:
+            time.sleep(interval_sec)
+            if not self._running:
+                break
+            for multi, ssrc in self._lifetime_entries:
+                try:
+                    multi.set_channel_lifetime(
+                        ssrc, self._radiod_lifetime_frames
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "lifetime keepalive failed (ssrc=%s): %s", ssrc, exc,
+                    )
 
     # -- systemd integration --
 
