@@ -6,11 +6,11 @@ A sigmond-compliant HFDL (High Frequency Data Link) recorder for
 `hfdl-recorder` subscribes to per-band IQ multicast streams from one or
 more `radiod` instances via [ka9q-python](https://github.com/ka9q/ka9q-python),
 supervises one [`dumphfdl`](https://github.com/szpajder/dumphfdl) subprocess
-per enabled band (feeding it CS16 IQ via stdin), and writes the decoded
+per enabled band (feeding it CF32 IQ via stdin), and writes the decoded
 JSON to a local file per band — optionally pushing to
 `feed.airframes.io:5556` over TCP.
 
-It is the fourth client in the HamSCI sigmond contract v0.4 family,
+It is the fourth client in the HamSCI sigmond contract v0.6 family,
 following the same Pattern A install layout and deploy ergonomics as
 [psk-recorder](https://github.com/mijahauan/psk-recorder),
 [wspr-recorder](https://github.com/mijahauan/wspr-recorder), and
@@ -26,13 +26,13 @@ following the same Pattern A install layout and deploy ergonomics as
       │  per-band IQ multicast (one RTP group per HFDL band — typically all              │
       │  on hfdl.local; F32LE complex IQ at the band's native samprate)                  │
       │                                                                                  │
-      ├── HFDL21 @ 21964 kHz, 80 kS/s ───────► MultiStream ──► float32→CS16 ──► stdin ──►│ dumphfdl
-      ├── HFDL13 @ 13310 kHz, 100 kS/s ──────► MultiStream ──► float32→CS16 ──► stdin ──►│ dumphfdl
-      ├── HFDL11 @ 11287 kHz, 220 kS/s ──────► MultiStream ──► float32→CS16 ──► stdin ──►│ dumphfdl
-      ├── HFDL10 @ 10061.5 kHz, 80 kS/s ─────► MultiStream ──► float32→CS16 ──► stdin ──►│ dumphfdl
-      ├── HFDL8  @  8902.5 kHz, 160 kS/s ────► MultiStream ──► float32→CS16 ──► stdin ──►│ dumphfdl
-      ├── HFDL6  @  6622 kHz, 192 kS/s ──────► MultiStream ──► float32→CS16 ──► stdin ──►│ dumphfdl
-      └── HFDL5  @  5587 kHz, 277.2 kS/s ────► MultiStream ──► float32→CS16 ──► stdin ──►│ dumphfdl
+      ├── HFDL21 @ 21964 kHz, 80 kS/s ───────► MultiStream ──► float32→CF32 ──► stdin ──►│ dumphfdl
+      ├── HFDL13 @ 13310 kHz, 100 kS/s ──────► MultiStream ──► float32→CF32 ──► stdin ──►│ dumphfdl
+      ├── HFDL11 @ 11287 kHz, 220 kS/s ──────► MultiStream ──► float32→CF32 ──► stdin ──►│ dumphfdl
+      ├── HFDL10 @ 10061.5 kHz, 80 kS/s ─────► MultiStream ──► float32→CF32 ──► stdin ──►│ dumphfdl
+      ├── HFDL8  @  8902.5 kHz, 160 kS/s ────► MultiStream ──► float32→CF32 ──► stdin ──►│ dumphfdl
+      ├── HFDL6  @  6622 kHz, 192 kS/s ──────► MultiStream ──► float32→CF32 ──► stdin ──►│ dumphfdl
+      └── HFDL5  @  5587 kHz, 277.2 kS/s ────► MultiStream ──► float32→CF32 ──► stdin ──►│ dumphfdl
                                                                                           │
                                                                                           ├──► /var/lib/hfdl-recorder/<rid>/<band>.json   (always-on)
                                                                                           └──► feed.airframes.io:5556 over TCP            (opt-in)
@@ -154,7 +154,7 @@ directly via dumphfdl's own `--output decoded:json:tcp:…` sink.
 - See [CLAUDE.md](CLAUDE.md) for development briefing and architecture.
 - See [config/hfdl-recorder-config.toml.template](config/hfdl-recorder-config.toml.template)
   for the full config schema.
-- The client contract v0.4 spec lives in
+- The client contract v0.6 spec lives in
   [sigmond/docs/CLIENT-CONTRACT.md](https://github.com/mijahauan/sigmond/blob/main/docs/CLIENT-CONTRACT.md).
 
 ## License

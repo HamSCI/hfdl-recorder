@@ -5,10 +5,10 @@
 **hfdl-recorder** is a Python client that subscribes to per-band IQ
 multicast streams from one or more ka9q-radio `radiod` instances via
 `ka9q-python`, supervises one `dumphfdl` C subprocess per enabled band
-(feeding it CS16 IQ via stdin), and writes the decoded JSON to a local
+(feeding it CF32 IQ via stdin), and writes the decoded JSON to a local
 file per band — optionally pushing to `feed.airframes.io:5556` over TCP.
 
-It is the fourth client in the HamSCI sigmond contract v0.4 family
+It is the fourth client in the HamSCI sigmond contract v0.6 family
 (after `psk-recorder`, `wspr-recorder`, `hf-timestd`) and follows the
 same Pattern A install layout, deploy ergonomics, and contract surface.
 
@@ -46,19 +46,29 @@ hfdl-recorder daemon --config /etc/hfdl-recorder/hfdl-recorder-config.toml --rad
 ```
 radiod (ka9q-radio)
   │  per-band IQ multicast (one group per HFDL band; usually all on hfdl.local)
-  │  preset=iq, samprate=band-specific, encoding=s16be
+  │  preset=iq, samprate=band-specific, encoding=F32LE
   ▼
 hfdl-recorder daemon (one per radiod, = one systemd instance)
   │
   ├─ BandPipeline(HFDL21)
   │    ├─ ka9q.MultiStream subscription (float32 IQ samples)
-  │    ├─ writer task: float32 → CS16 (numpy view+cast) → dumphfdl stdin
-  │    └─ dumphfdl subprocess: --iq-file - --centerfreq 21964 --sample-rate 80000 ...
+  │    ├─ writer task: float32 → CF32 (numpy view+cast) → dumphfdl stdin
+  │    └─ dumphfdl subprocess: --iq-file - --sample-format cf32 --centerfreq 21964 --sample-rate 80000 ...
   │         └─ JSON sinks: local file (always) + feed.airframes.io (opt-in)
   ├─ BandPipeline(HFDL13)
   ├─ BandPipeline(HFDL11)
   └─ ... one per enabled band
+  │
+  └─ ChTailer(HFDL21..) — one daemon thread per band; tails the per-band
+       JSON spool and inserts parsed frames into hfdl.spots via
+       sigmond.hamsci_ch.Writer.from_env() (local SQLite sink by default)
 ```
+
+The daemon requests `F32LE` IQ from radiod (`encoding=4`) even though the
+radiod HFDL fragment declares the bands as `s16be`: ka9q-python's IQ
+payload parser hard-codes float32 LE, so a distinct `(freq, sample_rate,
+encoding)` tuple is provisioned on demand. See `core/radiod.py` for the
+rationale.
 
 ## Project Structure
 
@@ -66,12 +76,14 @@ hfdl-recorder daemon (one per radiod, = one systemd instance)
 src/hfdl_recorder/
   cli.py              # CLI entry point, argparse, stdout-cleanliness guard
   config.py           # TOML loader, radiod block resolution, defaults
-  contract.py         # inventory/validate JSON builders (contract v0.4)
+  configurator.py     # config init|edit subcommands
+  contract.py         # inventory/validate JSON builders (contract v0.6)
   bands.py            # static HFDL_BANDS table (12 entries)
   version.py          # GIT_INFO dict for provenance
   core/
     daemon.py         # HfdlRecorder: orchestrates per-band pipelines
     band_pipeline.py  # BandPipeline: ka9q subscription + dumphfdl Popen
+    ch_tailer.py      # ChTailer: tails per-band JSON spool → hfdl.spots
     feed.py           # build dumphfdl --output argv from [sinks]
     radiod.py         # ensure_channel() wrapper
 tests/
@@ -89,7 +101,7 @@ scripts/
   install.sh          # First-run bootstrap (Pattern A) + dumphfdl build
   deploy.sh           # Editable-install refresh
   build-dumphfdl.sh   # Vendored libacars + dumphfdl C build
-deploy.toml           # Sigmond deploy manifest (contract v0.4)
+deploy.toml           # Sigmond deploy manifest (contract v0.6)
 ```
 
 ## Key Design Decisions
@@ -97,7 +109,7 @@ deploy.toml           # Sigmond deploy manifest (contract v0.4)
 - **One systemd instance per radiod** (`hfdl-recorder@<radiod_id>.service`),
   matching `psk-recorder` / `wspr-recorder`. The Python daemon supervises
   one `dumphfdl` subprocess per enabled band.
-- **Python is in the IQ data path**, but only as a thin float32→CS16
+- **Python is in the IQ data path**, but only as a thin float32→CF32
   forwarder via numpy. Matches `wspr-recorder` symmetry (no `pcmrecord`
   dependency). Per-band data rate ≤ 1.1 MB/s on the widest band (HFDL5
   @ 277.2 kS/s); GIL releases during socket recv and subprocess write.
@@ -113,10 +125,17 @@ deploy.toml           # Sigmond deploy manifest (contract v0.4)
 - **Aggregators are opt-in** — `sinks.local_json` defaults true,
   `sinks.airframes_io` defaults false; extra TCP/UDP sinks via the
   `sinks.extra` array.
+- **Spot tailer feeds `hfdl.spots`** — `core/ch_tailer.py` runs one
+  daemon thread per band that tails the per-band JSON spool and inserts
+  parsed frames via `sigmond.hamsci_ch.Writer.from_env()`, which stages
+  rows into sigmond's local SQLite sink (`/var/lib/sigmond/sink.db`) by
+  default. It resolves to a no-op only when the sink path is unwritable.
+  Independent of dumphfdl's own airframes.io TCP feed (which is
+  dumphfdl-internal).
 
-## Client Contract (v0.4)
+## Client Contract (v0.6)
 
-hfdl-recorder implements the HamSCI client contract v0.4 as defined in
+hfdl-recorder implements the HamSCI client contract v0.6 as defined in
 `sigmond/docs/CLIENT-CONTRACT.md`. Key surfaces:
 
 - `hfdl-recorder inventory --json` — per-instance resource view
@@ -125,10 +144,13 @@ hfdl-recorder implements the HamSCI client contract v0.4 as defined in
 - `EnvironmentFile=-/etc/sigmond/coordination.env` in the systemd unit
 - §7: data destination read from ka9q-python, not client-specified
 - §8: `RADIOD_<id>_CHAIN_DELAY_NS` read from env on startup
-- §10: `log_paths` in inventory output (process log, per-band logs, JSON sinks)
+- §10: `log_paths` in inventory output (per-band logs, JSON sinks); the
+  daemon process log goes to the systemd journal, not a file, so it is
+  not listed in `log_paths`
 - §11: `HFDL_RECORDER_LOG_LEVEL` / `CLIENT_LOG_LEVEL` honored on startup
   and SIGHUP
 - §12.2: duplicate-band check (analogue of psk-recorder's SSRC collision check)
+- §17: `ChTailer` parses dumphfdl frames into `hfdl.spots`
 
 ## External Dependencies (not pip-installable)
 
@@ -146,7 +168,8 @@ hfdl-recorder implements the HamSCI client contract v0.4 as defined in
 - JSON spool: `/var/lib/hfdl-recorder/<radiod_id>/<BAND>.json`
 - systable: `/var/lib/hfdl-recorder/systable.conf` (auto-updated)
 - Per-band logs: `/var/log/hfdl-recorder/<radiod_id>-<BAND>.log` (dumphfdl stderr)
-- Process log: `/var/log/hfdl-recorder/<radiod_id>.log`
+- Process log: systemd journal (`StandardOutput=journal`) —
+  `journalctl -u hfdl-recorder@<radiod_id>` or `smd log hfdl-recorder`
 - Venv: `/opt/hfdl-recorder/venv`
 - Source: `/opt/git/sigmond/hfdl-recorder` (editable install)
 - dumphfdl binary: `/opt/hfdl-recorder/bin/dumphfdl`
