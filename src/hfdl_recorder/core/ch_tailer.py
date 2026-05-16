@@ -1,19 +1,21 @@
-"""ClickHouse tailer for hfdl-recorder (CONTRACT v0.6 §17).
+"""Spot-log tailer for hfdl-recorder (CONTRACT v0.6 §17).
 
 Watches the per-band JSON spool that `dumphfdl` writes via
 `--output decoded:json:file:path=<path>` (one compact JSON object per
 line, terminated with `\\n` — see ka9q/dumphfdl `fmtr-json.c:55` /
 `EOL(vstr)`).  Parses each new frame, extracts the high-signal fields,
 preserves the raw JSON for a future re-parse, and inserts rows into
-`hfdl.spots` via `sigmond.hamsci_ch.Writer`.
+`hfdl.spots` via `sigmond.hamsci_ch.Writer.from_env()`.
 
 Runs as a daemon thread inside the HfdlRecorder process, parallel to
 dumphfdl's own optional airframes.io TCP feed (which is not affected
 because that path is dumphfdl-internal, not via this file).
 
-The CH path is additive: when `SIGMOND_CLICKHOUSE_URL` is unset the
-tailer is a clean no-op.  When SFTP/airframes uploads eventually move
-to `hs-uploader`, this tailer remains as the producer-side sink.
+`Writer.from_env()` stages rows into sigmond's local SQLite sink by
+default (`/var/lib/sigmond/sink.db`); it resolves to a clean no-op
+only when the sink path is unwritable.  This tailer is the
+producer-side sink; moving the airframes / SFTP upload path onto
+`hs-uploader` is still future work.
 """
 from __future__ import annotations
 
@@ -251,7 +253,7 @@ class ChTailer:
 
     Spawns a daemon thread that polls the file for new frames, parses
     each, and inserts rows into `hfdl.spots` via hamsci_ch.Writer.
-    No-op when SIGMOND_CLICKHOUSE_URL is unset.
+    Clean no-op only when the sink path is unwritable.
     """
 
     POLL_INTERVAL_SEC = 1.0
@@ -292,8 +294,8 @@ class ChTailer:
             logger.warning("ch_tailer disabled (band=%s): %s", self._band_name, e)
             return
         if self._writer.is_noop:
-            logger.debug("ch_tailer band=%s: SIGMOND_CLICKHOUSE_URL unset; noop",
-                         self._band_name)
+            logger.debug("ch_tailer band=%s: sink writer is a no-op "
+                         "(sink path unwritable)", self._band_name)
         if self._json_path.exists():
             try:
                 self._last_pos = self._json_path.stat().st_size
