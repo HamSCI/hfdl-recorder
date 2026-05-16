@@ -32,7 +32,9 @@ TimeoutStartSec=60
 Restart=always
 RestartSec=5
 
-StandardOutput=append:/var/log/hfdl-recorder/%i.log
+# Logs go to the systemd journal (sigmond standard) — query with
+# `journalctl -u hfdl-recorder@%i` or `smd log hfdl-recorder`.
+StandardOutput=journal
 StandardError=inherit
 SyslogIdentifier=hfdl-recorder@%i
 
