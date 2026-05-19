@@ -46,13 +46,12 @@ def test_inventory_instance_shape():
     assert inst["uses_timing_calibration"] is False
 
 
-def test_inventory_data_sinks_v0_6(monkeypatch):
+def test_inventory_data_sinks_v0_6():
     """CONTRACT v0.6 §17.3: every instance has a data_sinks array.
 
-    File sinks are always declared; the CH sink only appears when
-    SIGMOND_CLICKHOUSE_URL is set.
+    File sinks are always declared. ClickHouse support has been
+    removed suite-wide; only file sinks remain.
     """
-    monkeypatch.delenv("SIGMOND_CLICKHOUSE_URL", raising=False)
     cfg = load_config(FIXTURE)
     inv = build_inventory(cfg, FIXTURE)
     inst = inv["instances"][0]
@@ -63,15 +62,6 @@ def test_inventory_data_sinks_v0_6(monkeypatch):
     for sink in inst["data_sinks"]:
         for required in ("kind", "target", "retention_days", "mb_per_day"):
             assert required in sink, f"sink missing {required}"
-
-    # With CH configured, the clickhouse sink appears.
-    monkeypatch.setenv("SIGMOND_CLICKHOUSE_URL", "http://localhost:8123")
-    inv = build_inventory(cfg, FIXTURE)
-    inst = inv["instances"][0]
-    ch = [s for s in inst["data_sinks"] if s["kind"] == "clickhouse"]
-    assert len(ch) == 1
-    assert ch[0]["target"] == "hfdl.spots"
-    assert ch[0]["schema_ref"] == "hfdl:1"
 
 
 def test_validate_passes_with_fixture():

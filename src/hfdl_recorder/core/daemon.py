@@ -165,10 +165,11 @@ class HfdlRecorder:
         """Start one ChTailer per enabled band — CONTRACT v0.6 §17.
 
         Each tailer watches the per-band JSON spool dumphfdl writes
-        and inserts parsed frames into `hfdl.spots`.  No-op when
-        SIGMOND_CLICKHOUSE_URL is unset.  Failure to import / start is
-        non-fatal: dumphfdl's own outputs (local JSON, optional
-        airframes.io TCP) are unaffected.
+        and stages parsed frames into `hfdl.spots` via sigmond's local
+        SQLite sink.  Resolves to a no-op when the sink path is
+        unwritable.  Failure to import / start is non-fatal: dumphfdl's
+        own outputs (local JSON, optional airframes.io TCP) are
+        unaffected.
         """
         from pathlib import Path as _Path
         paths = self._config.get("paths", {})

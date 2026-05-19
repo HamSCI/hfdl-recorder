@@ -66,10 +66,9 @@ def build_inventory(config: dict, config_path: Path) -> dict:
         frequencies_hz = sorted(b.center_hz for b in bands)
 
         # CONTRACT v0.6 §17 — output sinks per instance.  Local JSON files
-        # are always declared (canonical artifact dumphfdl writes); a
-        # clickhouse sink is added when sigmond has published
-        # SIGMOND_CLICKHOUSE_URL into the env (CH-disabled hosts stay
-        # file-only with no extra moving parts).
+        # are always declared (canonical artifact dumphfdl writes); the
+        # ChTailer additionally stages parsed `hfdl.spots` rows into
+        # sigmond's local SQLite sink, which `hs-uploader` drains upstream.
         data_sinks: list[dict[str, Any]] = [
             {
                 "kind":           "file",
@@ -86,15 +85,6 @@ def build_inventory(config: dict, config_path: Path) -> dict:
                 "mb_per_day":     5,
             },
         ]
-        if os.environ.get("SIGMOND_CLICKHOUSE_URL", "").strip():
-            data_sinks.append({
-                "kind":           "clickhouse",
-                "target":         "hfdl.spots",
-                "schema_ref":     "hfdl:1",
-                "retention_days": 14,
-                "mb_per_day":     max(1, len(list(bands))),
-                "health":         "ok",
-            })
 
         instance = {
             "instance": radiod_id,
