@@ -61,7 +61,7 @@ hfdl-recorder daemon (one per radiod, = one systemd instance)
   │
   └─ ChTailer(HFDL21..) — one daemon thread per band; tails the per-band
        JSON spool and inserts parsed frames into hfdl.spots via
-       sigmond.hamsci_ch.Writer.from_env() (local SQLite sink by default)
+       sigmond.hamsci_sink.Writer.from_env() (local SQLite sink)
 ```
 
 The daemon requests `F32LE` IQ from radiod (`encoding=4`) even though the
@@ -127,7 +127,7 @@ deploy.toml           # Sigmond deploy manifest (contract v0.6)
   `sinks.extra` array.
 - **Spot tailer feeds `hfdl.spots`** — `core/ch_tailer.py` runs one
   daemon thread per band that tails the per-band JSON spool and inserts
-  parsed frames via `sigmond.hamsci_ch.Writer.from_env()`, which stages
+  parsed frames via `sigmond.hamsci_sink.Writer.from_env()`, which stages
   rows into sigmond's local SQLite sink (`/var/lib/sigmond/sink.db`) by
   default. It resolves to a no-op only when the sink path is unwritable.
   Independent of dumphfdl's own airframes.io TCP feed (which is

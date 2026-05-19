@@ -5,7 +5,7 @@ Watches the per-band JSON spool that `dumphfdl` writes via
 line, terminated with `\\n` — see ka9q/dumphfdl `fmtr-json.c:55` /
 `EOL(vstr)`).  Parses each new frame, extracts the high-signal fields,
 preserves the raw JSON for a future re-parse, and inserts rows into
-`hfdl.spots` via `sigmond.hamsci_ch.Writer.from_env()`.
+`hfdl.spots` via `sigmond.hamsci_sink.Writer.from_env()`.
 
 Runs as a daemon thread inside the HfdlRecorder process, parallel to
 dumphfdl's own optional airframes.io TCP feed (which is not affected
@@ -252,7 +252,7 @@ class ChTailer:
     """One tailer per (radiod, band) JSON file.
 
     Spawns a daemon thread that polls the file for new frames, parses
-    each, and inserts rows into `hfdl.spots` via hamsci_ch.Writer.
+    each, and inserts rows into `hfdl.spots` via hamsci_sink.Writer.
     Clean no-op only when the sink path is unwritable.
     """
 
@@ -397,8 +397,8 @@ class ChTailer:
 
 
 def _default_writer_factory(batch_rows: int):
-    """Lazy-import sigmond.hamsci_ch.Writer for hfdl.spots."""
-    from sigmond.hamsci_ch import Writer
+    """Lazy-import sigmond.hamsci_sink.Writer for hfdl.spots."""
+    from sigmond.hamsci_sink import Writer
     return Writer.from_env(
         table="spots", mode="hfdl",
         schema_version=1, batch_rows=batch_rows,
