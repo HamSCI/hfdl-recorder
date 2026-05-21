@@ -45,7 +45,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ka9q-python", specifier = ">=3.13.0" },
+    { name = "ka9q-python", specifier = ">=3.14.0" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
@@ -63,15 +63,15 @@ wheels = [
 
 [[package]]
 name = "ka9q-python"
-version = "3.13.0"
+version = "3.15.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/16/46/37fcc135022903d38608ee6767e293ad8eb4db83ea2342a499b08c1e8cb4/ka9q_python-3.13.0.tar.gz", hash = "sha256:2b00c14965fe68b5a1def38e3a1707fb7ba129b583175f44d198609b8362842d", size = 243053, upload-time = "2026-05-08T13:54:19.972Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/59/a0/61b9327fc335787a34063cf20f1873d8e4fe04bea8a50adb9ea9e85694f0/ka9q_python-3.15.0.tar.gz", hash = "sha256:16313d7ab37478c5a20c5841bdd2581ac1d214181c74d4b3efd9dc6590264e1b", size = 258401, upload-time = "2026-05-21T01:25:00.071Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4c/08/bf803959188f65f7298f7a8e978be7b2ccd72b017aca94fc91859f3d106d/ka9q_python-3.13.0-py3-none-any.whl", hash = "sha256:dd88c5763204821d7f1e4f2a59cac6fa463a92c4bfce82f30018d28b3e6fbb27", size = 100226, upload-time = "2026-05-08T13:54:18.634Z" },
+    { url = "https://files.pythonhosted.org/packages/2a/c9/93e44c765f80563ed08b53cfc0756c8275b768fc730eb218455cb373e4bf/ka9q_python-3.15.0-py3-none-any.whl", hash = "sha256:6b443724d003d0a1292484a536001f2a86a13ff2d8eb218ca044fc3a202b3bf3", size = 106597, upload-time = "2026-05-21T01:24:58.799Z" },
 ]
 
 [[package]]
