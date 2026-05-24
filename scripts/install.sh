@@ -51,6 +51,34 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# --- Phase 0.5: ensure uv is on PATH (canonical sigmond-suite installer) ---
+_ensure_uv() {
+    if command -v uv >/dev/null 2>&1; then
+        ui_info "uv $(uv --version 2>/dev/null | awk '{print $2}') at $(command -v uv)"
+        return
+    fi
+    ui_info "uv not found -- installing system-wide to /usr/local/bin"
+    command -v curl >/dev/null || { ui_error "curl not found (apt install curl)"; exit 1; }
+    if ! curl -LsSf https://astral.sh/uv/install.sh | env XDG_BIN_HOME=/usr/local/bin UV_NO_MODIFY_PATH=1 sh; then
+        ui_error "uv installer failed"
+        exit 1
+    fi
+    command -v uv >/dev/null || { ui_error "uv installer ran but uv is still not on PATH"; exit 1; }
+    ui_info "uv $(uv --version 2>/dev/null | awk '{print $2}') installed"
+}
+_ensure_uv
+
+# --- Phase 0.6: ensure ka9q-python sibling repo is on disk ---
+# pyproject.toml's [tool.uv.sources] declares ka9q-python as a path-based
+# editable dep at ../ka9q-python.  uv sync needs the directory to exist
+# at /opt/git/sigmond/ka9q-python or it fails.
+if [[ ! -f /opt/git/sigmond/ka9q-python/pyproject.toml ]]; then
+    ui_info "ka9q-python sibling repo not at /opt/git/sigmond/ka9q-python -- cloning"
+    mkdir -p /opt/git/sigmond
+    git clone https://github.com/mijahauan/ka9q-python /opt/git/sigmond/ka9q-python \
+        || { ui_error "Failed to clone ka9q-python"; exit 1; }
+fi
+
 # --- Phase 1: service user ---
 if ! id -u "$SERVICE_USER" &>/dev/null; then
     ui_info "Creating service user $SERVICE_USER"
@@ -82,12 +110,34 @@ fi
 if [[ ! -d "$VENV_DIR" ]]; then
     ui_info "Creating venv at $VENV_DIR"
     mkdir -p "$(dirname "$VENV_DIR")"
-    python3 -m venv "$VENV_DIR"
+    # --seed populates pip/setuptools/wheel for compatibility with tooling
+    # that shells out to pip; harmless overhead otherwise.
+    uv venv "$VENV_DIR" --python 3.11 --seed --quiet
 fi
 
-ui_info "Installing hfdl-recorder (editable) into venv"
-"$VENV_DIR/bin/pip" install --upgrade pip setuptools wheel >/dev/null
-"$VENV_DIR/bin/pip" install -e "$REPO_SOURCE" >/dev/null
+# uv sync reads pyproject.toml + uv.lock, resolves [tool.uv.sources]
+# (ka9q-python editable from ../ka9q-python), installs hfdl-recorder
+# itself editable, and pins exactly what's in uv.lock.  --no-dev skips
+# dev extras (pytest etc.); --frozen requires uv.lock to be current
+# (regenerate locally with `uv lock` if siblings or deps have shifted).
+ui_info "Syncing hfdl-recorder + ka9q-python (editable) into $VENV_DIR"
+UV_PROJECT_ENVIRONMENT="$VENV_DIR" \
+    uv sync --project "$REPO_SOURCE" --frozen --no-dev --quiet
+
+# sigmond is the host-wide orchestrator; hfdl-recorder lazy-imports
+# sigmond.hamsci_sink.Writer in core/ch_tailer.py for the hfdl.spots
+# SQLite sink (with a no-op fallback when absent).  Not declared in
+# hfdl-recorder's pyproject so uv sync doesn't install it; explicit
+# uv pip install when the sibling exists.  uv pip install needs
+# --python (UV_PROJECT_ENVIRONMENT only applies to project commands
+# like uv sync).
+if [[ -d /opt/git/sigmond/sigmond ]]; then
+    ui_info "Installing sigmond (editable) into venv"
+    uv pip install --quiet --python "$VENV_DIR/bin/python3" -e /opt/git/sigmond/sigmond
+else
+    ui_info "sigmond repo not found at /opt/git/sigmond/sigmond -- SQLite spot sink"
+    ui_info "  will resolve to a no-op fallback."
+fi
 
 # Post-install verify
 if ! sudo -u "$SERVICE_USER" "$VENV_DIR/bin/python3" -c 'import hfdl_recorder' 2>/dev/null; then
