@@ -20,7 +20,7 @@ from hfdl_recorder.version import GIT_INFO
 
 logger = logging.getLogger(__name__)
 
-CONTRACT_VERSION = "0.6"
+CONTRACT_VERSION = "0.7"
 
 
 def build_inventory(config: dict, config_path: Path) -> dict:
@@ -103,6 +103,14 @@ def build_inventory(config: dict, config_path: Path) -> dict:
             "uses_timing_calibration": False,
             "provides_timing_calibration": False,
             "chain_delay_ns_applied": chain_delay,
+            # CONTRACT v0.7 §18 — runtime-state field for the §18
+            # subscription. hfdl-recorder runs in RTP-default mode
+            # (HFDL frame decoding is ms-tolerant; no hard-deadline
+            # scheduling against UTC). Reported as null to satisfy
+            # the v0.7 inventory shape; sigmond's adapter
+            # distinguishes contract-aware-in-default-mode from a
+            # pre-v0.7 client by the field's explicit presence.
+            "timing_authority_applied": None,
         }
         instances.append(instance)
 

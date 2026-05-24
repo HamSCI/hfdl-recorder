@@ -1,4 +1,4 @@
-"""Tests for contract v0.6 inventory/validate JSON builders."""
+"""Tests for contract v0.7 inventory/validate JSON builders."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from hfdl_recorder.contract import (
 FIXTURE = Path(__file__).parent / "fixtures" / "test-config.toml"
 
 
-def test_contract_version_is_0_6():
-    assert CONTRACT_VERSION == "0.6"
+def test_contract_version_is_0_7():
+    assert CONTRACT_VERSION == "0.7"
 
 
 def test_inventory_required_top_level_keys():
@@ -27,7 +27,7 @@ def test_inventory_required_top_level_keys():
     ):
         assert key in inv, f"missing top-level inventory key: {key}"
     assert inv["client"] == "hfdl-recorder"
-    assert inv["contract_version"] == "0.6"
+    assert inv["contract_version"] == "0.7"
 
 
 def test_inventory_instance_shape():
@@ -44,6 +44,19 @@ def test_inventory_instance_shape():
     assert inst["frequencies_hz"] == sorted(inst["frequencies_hz"])
     assert inst["data_destination"] is None  # contract §7
     assert inst["uses_timing_calibration"] is False
+
+
+def test_inventory_timing_authority_applied_v0_7():
+    """CONTRACT v0.7 §3/§18 — runtime-state field for the §18
+    subscription. hfdl-recorder runs in RTP-default mode (HFDL
+    frame decoding is ms-tolerant), so the field is present and
+    explicitly None — distinguishes contract-aware-in-default-mode
+    from a pre-v0.7 client."""
+    cfg = load_config(FIXTURE)
+    inv = build_inventory(cfg, FIXTURE)
+    inst = inv["instances"][0]
+    assert "timing_authority_applied" in inst
+    assert inst["timing_authority_applied"] is None
 
 
 def test_inventory_data_sinks_v0_6():
