@@ -204,3 +204,22 @@ uv run pytest tests/test_band_pipeline.py -v          # one file
 uv run pytest tests/test_band_pipeline.py::TestX::testY  # one test
 uv run pytest -k contract -v                          # by keyword
 ```
+
+## Per-instance cutover (Phase 5 of sigmond multi-instance architecture)
+
+The systemd unit (`hfdl-recorder@%i.service`) now passes `--instance %i`
+to the daemon (alongside `--radiod-id %i`).
+`config.resolve_config_path()` prefers `/etc/hfdl-recorder/<instance>.toml`
+when it exists; otherwise falls back to the legacy shared
+`hfdl-recorder-config.toml` with a one-line `DeprecationWarning`.
+
+Until operators run `sudo smd instance migrate` (sigmond Phase 8),
+existing deployments keep running unchanged.
+
+Spot rows now carry a first-class `reporter_id` field — falls back to
+`radiod_id` (matching the existing `instance` field) for legacy
+deployments; set explicitly via the `[instance]` block in a per-
+instance config post-migration.
+
+See `/opt/git/sigmond/sigmond/docs/MULTI-INSTANCE-ARCHITECTURE.md`
+for the architecture and phase plan.

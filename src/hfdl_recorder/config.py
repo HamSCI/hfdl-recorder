@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 try:
     import tomllib
@@ -15,6 +16,66 @@ from hfdl_recorder.bands import HFDL_BANDS, HfdlBand
 
 
 DEFAULT_CONFIG_PATH = Path("/etc/hfdl-recorder/hfdl-recorder-config.toml")
+PER_INSTANCE_CONFIG_DIR = Path("/etc/hfdl-recorder")
+
+
+def resolve_config_path(
+    instance: Optional[str] = None,
+    explicit_path: Optional[Path] = None,
+) -> Path:
+    """Resolve config path per sigmond MULTI-INSTANCE-ARCHITECTURE.md §4.
+
+    Precedence: explicit_path > $HFDL_RECORDER_CONFIG > per-instance
+    /etc/hfdl-recorder/<instance>.toml (when given and exists) > legacy
+    /etc/hfdl-recorder/hfdl-recorder-config.toml (with DeprecationWarning
+    when --instance was given but per-instance file is missing).
+    """
+    if explicit_path is not None:
+        return Path(explicit_path)
+    env_override = os.environ.get("HFDL_RECORDER_CONFIG")
+    if env_override:
+        return Path(env_override)
+    if instance:
+        per_instance = PER_INSTANCE_CONFIG_DIR / f"{instance}.toml"
+        if per_instance.exists():
+            return per_instance
+        warnings.warn(
+            f"per-instance config {per_instance} not found; falling "
+            f"back to legacy shared config {DEFAULT_CONFIG_PATH}. "
+            f"Migrate this host with `sudo smd instance migrate` "
+            f"(MULTI-INSTANCE-ARCHITECTURE.md §6).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    return DEFAULT_CONFIG_PATH
+
+
+def extract_reporter_id(config_or_path) -> Optional[str]:
+    """Read reporter_id from a per-instance config's [instance] block.
+
+    Accepts a parsed TOML dict or a Path.  Returns None when no
+    [instance] block.  Callers should NOT fall back to args.instance
+    (the systemd %i, typically a radiod id, not a reporter id);
+    row construction falls back to radiod_id instead.
+    """
+    if isinstance(config_or_path, dict):
+        raw = config_or_path
+    else:
+        path = Path(config_or_path)
+        if not path.exists():
+            return None
+        try:
+            with open(path, "rb") as f:
+                raw = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            return None
+    inst = raw.get("instance")
+    if not isinstance(inst, dict):
+        return None
+    rid = inst.get("reporter_id")
+    if not isinstance(rid, str) or not rid:
+        return None
+    return rid
 
 DEFAULTS: dict[str, Any] = {
     "paths": {

@@ -103,6 +103,12 @@ def main():
 
     sub_daemon = subparsers.add_parser("daemon", help="Run recorder daemon")
     sub_daemon.add_argument(
+        "--instance", default=None,
+        help="Reporter-ID instance (loads /etc/hfdl-recorder/<instance>.toml "
+             "when present; falls back to shared config otherwise). "
+             "See sigmond's MULTI-INSTANCE-ARCHITECTURE.md §6.",
+    )
+    sub_daemon.add_argument(
         "--radiod-id", default=None,
         help="ID of the [[radiod]] block to use",
     )
@@ -250,22 +256,28 @@ def _handle_daemon(args):
     logger = logging.getLogger("hfdl_recorder.daemon")
 
     from hfdl_recorder.config import (
-        DEFAULT_CONFIG_PATH, load_config, resolve_radiod_block,
+        extract_reporter_id, load_config, resolve_config_path,
+        resolve_radiod_block,
     )
     from hfdl_recorder.core.daemon import HfdlRecorder
 
-    config_path = args.config or Path(
-        os.environ.get("HFDL_RECORDER_CONFIG", str(DEFAULT_CONFIG_PATH))
+    # Phase-5 cutover (sigmond MULTI-INSTANCE-ARCHITECTURE.md §4)
+    instance = getattr(args, "instance", None)
+    config_path = resolve_config_path(
+        instance=instance, explicit_path=args.config,
     )
     config = load_config(config_path)
     radiod_block = resolve_radiod_block(config, args.radiod_id)
+    reporter_id = extract_reporter_id(config_path)
 
     logger.info(
-        "Starting hfdl-recorder daemon for radiod %s (config=%s)",
+        "Starting hfdl-recorder daemon for radiod %s "
+        "(config=%s, reporter_id=%s)",
         radiod_block.get("id", "default"), config_path,
+        reporter_id or "<derived from radiod_id at row time>",
     )
 
-    recorder = HfdlRecorder(config, radiod_block)
+    recorder = HfdlRecorder(config, radiod_block, reporter_id=reporter_id)
     recorder.run()
 
 

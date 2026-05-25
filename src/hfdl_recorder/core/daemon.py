@@ -14,6 +14,7 @@ import os
 import signal
 import threading
 import time
+from typing import Optional
 
 from hfdl_recorder.config import (
     get_enabled_bands,
@@ -32,10 +33,20 @@ logger = logging.getLogger(__name__)
 class HfdlRecorder:
     """Manages all enabled HFDL bands for a single radiod."""
 
-    def __init__(self, config: dict, radiod_block: dict):
+    def __init__(
+        self,
+        config: dict,
+        radiod_block: dict,
+        *,
+        reporter_id: Optional[str] = None,
+    ):
         self._config = config
         self._radiod = radiod_block
         self._radiod_id = radiod_block.get("id", "default")
+        # Phase-5 (sigmond MULTI-INSTANCE-ARCHITECTURE.md §3): per-
+        # instance reporter ID.  None on legacy single-instance hosts;
+        # ChTailer falls back to radiod_id at row construction.
+        self._reporter_id = reporter_id
 
         self._pipelines: list[BandPipeline] = []
         self._multi_streams: list = []
@@ -198,6 +209,7 @@ class HfdlRecorder:
                     json_path=json_path,
                     band_name=band_name,
                     radiod_id=self._radiod_id,
+                    reporter_id=self._reporter_id,
                     host_call=host_call,
                     host_grid=host_grid,
                     processing_version=proc_version,

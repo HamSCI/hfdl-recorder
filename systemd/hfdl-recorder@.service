@@ -23,8 +23,16 @@ ExecStartPre=+/bin/mkdir -p /var/log/hfdl-recorder
 ExecStartPre=+/usr/bin/chown -R hfdlrec:hfdlrec /var/lib/hfdl-recorder/%i
 ExecStartPre=+/usr/bin/chown -R hfdlrec:hfdlrec /var/log/hfdl-recorder
 
+# Phase-5 cutover (sigmond MULTI-INSTANCE-ARCHITECTURE.md):
+# --instance %i picks up /etc/hfdl-recorder/%i.toml when the operator
+# has run `sudo smd instance migrate` (Phase 8).  Until then the
+# per-instance config doesn't exist and the daemon falls back to the
+# legacy /etc/hfdl-recorder/hfdl-recorder-config.toml with a one-line
+# deprecation warning.  --radiod-id %i stays for the legacy fallback
+# path; --config is intentionally omitted (explicit_path wins in
+# resolve_config_path, which would force the legacy path forever).
 ExecStart=/opt/hfdl-recorder/venv/bin/python3 -m hfdl_recorder.cli daemon \
-    --config /etc/hfdl-recorder/hfdl-recorder-config.toml \
+    --instance %i \
     --radiod-id %i
 
 TimeoutStartSec=60

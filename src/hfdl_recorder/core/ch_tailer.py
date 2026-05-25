@@ -270,10 +270,14 @@ class ChTailer:
         processing_version: str = "",
         batch_rows: int = 200,
         writer_factory=None,
+        reporter_id: Optional[str] = None,
     ) -> None:
         self._json_path = Path(json_path)
         self._band_name = band_name
         self._radiod_id = radiod_id
+        # Phase-5 (sigmond MULTI-INSTANCE-ARCHITECTURE.md §3):
+        # falls back to radiod_id for legacy single-instance hosts.
+        self._reporter_id = reporter_id or radiod_id
         self._host_call = host_call
         self._host_grid = host_grid
         self._processing_version = processing_version
@@ -385,7 +389,8 @@ class ChTailer:
             row["host_call"] = self._host_call
             row["host_grid"] = self._host_grid
             row["radiod_id"] = self._radiod_id
-            row["instance"] = self._radiod_id
+            row["instance"] = self._radiod_id   # legacy; removed Phase 9
+            row["reporter_id"] = self._reporter_id
             row["processing_version"] = self._processing_version
             rows.append(row)
         if rows:
