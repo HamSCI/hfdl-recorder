@@ -1,4 +1,6 @@
-# CLAUDE.md — hfdl-recorder Development Briefing
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## What this project is
 
@@ -8,9 +10,11 @@ multicast streams from one or more ka9q-radio `radiod` instances via
 (feeding it CF32 IQ via stdin), and writes the decoded JSON to a local
 file per band — optionally pushing to `feed.airframes.io:5556` over TCP.
 
-It is the fourth client in the HamSCI sigmond contract v0.6 family
-(after `psk-recorder`, `wspr-recorder`, `hf-timestd`) and follows the
-same Pattern A install layout, deploy ergonomics, and contract surface.
+It is part of the HamSCI sigmond suite — see
+`/opt/git/sigmond/sigmond/CLAUDE.md` (orchestrator) and
+`/opt/git/sigmond/CLAUDE.md` (umbrella) for cross-repo context. Follows
+the same Pattern A install layout and contract surface as `psk-recorder`,
+`wspr-recorder`, and `hf-timestd`.
 
 ## Authors
 
@@ -29,17 +33,23 @@ uv run hfdl-recorder validate --json --config tests/fixtures/test-config.toml
 # pip fallback / run-from-source:
 PYTHONPATH=src python3 -m hfdl_recorder inventory --json --config config/hfdl-recorder-config.toml.template
 
-# Production install (Pattern A editable install)
-sudo ./scripts/install.sh           # first-run: user, venv, dumphfdl build, config, systemd
-sudo ./scripts/deploy.sh            # ongoing: pip install -e, restart instances
+# Production install (uses sigmond's shared _ensure_uv helper)
+sudo ./scripts/install.sh           # first-run: user, venv (via uv), dumphfdl build, config, systemd
+sudo ./scripts/deploy.sh            # ongoing: refresh editable install + restart instances
 sudo ./scripts/deploy.sh --pull     # git pull then deploy
 
-# CLI
-hfdl-recorder inventory --json
-hfdl-recorder validate --json
-hfdl-recorder version --json
+# CLI (current — verify against `hfdl-recorder --help`)
+hfdl-recorder inventory --json      # per-instance resource view
+hfdl-recorder validate --json       # config validation
+hfdl-recorder version --json        # version + git sha
+hfdl-recorder status                # health check
+hfdl-recorder config init|edit      # whiptail wizard via sigmond.wizard_dispatch
 hfdl-recorder daemon --config /etc/hfdl-recorder/hfdl-recorder-config.toml --radiod-id my-rx888
 ```
+
+The test suite is moderate (~88 tests). When iterating, target the
+affected file with `uv run pytest tests/test_<area>.py -v` rather than
+the whole suite.
 
 ## Architecture
 
@@ -77,7 +87,7 @@ src/hfdl_recorder/
   cli.py              # CLI entry point, argparse, stdout-cleanliness guard
   config.py           # TOML loader, radiod block resolution, defaults
   configurator.py     # config init|edit subcommands
-  contract.py         # inventory/validate JSON builders (contract v0.6)
+  contract.py         # inventory/validate JSON builders (contract v0.7)
   bands.py            # static HFDL_BANDS table (12 entries)
   version.py          # GIT_INFO dict for provenance
   core/
@@ -101,7 +111,7 @@ scripts/
   install.sh          # First-run bootstrap (Pattern A) + dumphfdl build
   deploy.sh           # Editable-install refresh
   build-dumphfdl.sh   # Vendored libacars + dumphfdl C build
-deploy.toml           # Sigmond deploy manifest (contract v0.6)
+deploy.toml           # Sigmond deploy manifest
 ```
 
 ## Key Design Decisions
@@ -133,24 +143,34 @@ deploy.toml           # Sigmond deploy manifest (contract v0.6)
   Independent of dumphfdl's own airframes.io TCP feed (which is
   dumphfdl-internal).
 
-## Client Contract (v0.6)
+## Client contract (v0.7)
 
-hfdl-recorder implements the HamSCI client contract v0.6 as defined in
-`sigmond/docs/CLIENT-CONTRACT.md`. Key surfaces:
+hfdl-recorder implements the HamSCI client contract at version 0.7
+(authoritative source: `/opt/git/sigmond/sigmond/docs/CLIENT-CONTRACT.md`).
+`src/hfdl_recorder/contract.py` carries `CONTRACT_VERSION = "0.7"`.
 
-- `hfdl-recorder inventory --json` — per-instance resource view
-- `hfdl-recorder validate --json` — config validation
-- `deploy.toml` — build/install manifest
-- `EnvironmentFile=-/etc/sigmond/coordination.env` in the systemd unit
-- §7: data destination read from ka9q-python, not client-specified
-- §8: `RADIOD_<id>_CHAIN_DELAY_NS` read from env on startup
-- §10: `log_paths` in inventory output (per-band logs, JSON sinks); the
-  daemon process log goes to the systemd journal, not a file, so it is
-  not listed in `log_paths`
-- §11: `HFDL_RECORDER_LOG_LEVEL` / `CLIENT_LOG_LEVEL` honored on startup
-  and SIGHUP
-- §12.2: duplicate-band check (analogue of psk-recorder's SSRC collision check)
-- §17: `ChTailer` parses dumphfdl frames into `hfdl.spots`
+Sections implemented:
+
+- **§1 / §2 / §3 / §4 / §5** — native TOML config, radiod-id binding,
+  self-describe CLI (`inventory`/`validate`/`version` `--json`),
+  templated systemd unit, `deploy.toml` manifest.
+- **§6 / §7** — ka9q-python `MultiStream` per band; data destination
+  read from `ChannelInfo`, never client-specified.
+- **§8** — `RADIOD_<id>_CHAIN_DELAY_NS` read from `coordination.env`.
+- **§10 / §11** — `log_paths` in inventory output (per-band dumphfdl
+  stderr files + JSON spool); the daemon process log goes to the
+  systemd journal, so it is not listed in `log_paths`.
+  `HFDL_RECORDER_LOG_LEVEL` / `CLIENT_LOG_LEVEL` honored on startup
+  and SIGHUP.
+- **§12.2** — duplicate-band check (the HFDL analogue of psk-recorder's
+  SSRC-collision check, since HFDL bands aren't keyed by SSRC).
+- **§14** — `config init`/`edit` via `configurator.py`
+  (whiptail wizard + `sigmond.wizard_dispatch`).
+- **§17** — `ChTailer` parses dumphfdl JSON frames into `hfdl.spots`
+  rows in sigmond's local SQLite sink.
+- **§18 (timing authority)** — capability boolean declared in the
+  inventory; `timing_authority_applied` always `null` (RTP-default
+  mode; no §18 subscriber wired yet).
 
 ## External Dependencies (not pip-installable)
 
@@ -180,13 +200,7 @@ hfdl-recorder implements the HamSCI client contract v0.6 as defined in
 ```bash
 uv sync --extra dev
 uv run pytest tests/ -v
+uv run pytest tests/test_band_pipeline.py -v          # one file
+uv run pytest tests/test_band_pipeline.py::TestX::testY  # one test
+uv run pytest -k contract -v                          # by keyword
 ```
-
-
-1. Don’t assume. Don’t hide confusion. Surface tradeoffs.
-
-2. Minimum code that solves the problem. Nothing speculative.
-
-3. Touch only what you must. Clean up only your own mess.
-
-4. Define success criteria. Loop until verified.
