@@ -267,7 +267,29 @@ def _handle_daemon(args):
         instance=instance, explicit_path=args.config,
     )
     config = load_config(config_path)
-    radiod_block = resolve_radiod_block(config, args.radiod_id)
+    try:
+        radiod_block = resolve_radiod_block(config, args.radiod_id)
+    except ValueError:
+        # Post-`smd instance migrate` soft-cutover: the systemd
+        # template still passes --radiod-id %i (= reporter ID),
+        # which doesn't match the [[radiod]] block's id (= mDNS
+        # source label) in the per-instance config — and the
+        # /etc/radio/radiod@<reporter-id>.conf synth path doesn't
+        # exist either.  When --instance was given the per-instance
+        # config defines this instance's source unambiguously; fall
+        # through to None (single-block resolution).  Warn so the
+        # mismatch stays visible.  Legacy multi-radiod shared
+        # configs (no --instance) keep strict id matching.
+        if args.radiod_id is None or instance is None:
+            raise
+        logger.warning(
+            "--radiod-id=%r did not resolve in %s (--instance=%r); "
+            "falling through to single-block per-instance path.  "
+            "Drop --radiod-id from the systemd template once all "
+            "reporters are migrated.",
+            args.radiod_id, config_path, instance,
+        )
+        radiod_block = resolve_radiod_block(config, None)
     reporter_id = extract_reporter_id(config_path)
 
     logger.info(
