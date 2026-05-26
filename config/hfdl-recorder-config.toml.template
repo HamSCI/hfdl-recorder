@@ -33,8 +33,21 @@ airframes_io = false  # opt-in: TCP push to feed.airframes.io:5556
 # chain_delay_ns = 0
 
 [[radiod]]
-id            = "my-rx888"
-radiod_status = "my-rx888-status.local"   # mDNS, never IP
+# REQUIRED: the mDNS control/status multicast name of the radiod to
+# consume from.  Discover available radiods on the LAN with:
+#   hfdl-recorder config init      (interactive wizard, picks one)
+#   ka9q-python list               (raw discovery)
+# Examples: "bee1-status.local", "rx888-status.local".  Leave the
+# placeholder unchanged to make the daemon refuse to start until
+# the operator runs the configurator.
+status = "<configure-via-config-init>"
+
+# Legacy fields below are accepted during the Phase 3 deprecation
+# window (RADIOD-IDENTIFICATION.md §6).  Greenfield installs should
+# leave them out; existing deployments can keep them until the
+# operator runs the configurator to migrate to the `status` field.
+# id            = "my-rx888"
+# radiod_status = "my-rx888-status.local"   # mDNS, never IP
 
 [radiod.bands]
 # Curated default: high-yield bands across day/night propagation.

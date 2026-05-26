@@ -112,8 +112,8 @@ class InitCommandTests(unittest.TestCase):
             text = target.read_text()
             self.assertIn('station_id  = "AC0G-3"', text)
             self.assertIn('grid_square = "EM38"', text)
-            self.assertIn('id            = "bee1-rx888"', text)
-            self.assertIn('radiod_status = "bee1-status.local"', text)
+            # RADIOD-IDENTIFICATION.md §3.1: canonical field is `status`.
+            self.assertIn('status = "bee1-status.local"', text)
 
     def test_station_id_defaults_to_dash_1_when_no_index(self):
         # Standalone invocation (no sigmond) → INDEX unset → '-1'.
@@ -132,7 +132,8 @@ class InitCommandTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             text = target.read_text()
             self.assertIn('station_id  = "AC0G-1"', text)
-            self.assertIn('id            = "bee1-rx888"', text)
+            # RADIOD-IDENTIFICATION.md §3.1: canonical field is `status`.
+            self.assertIn('status = "bee1-status.local"', text)
 
     def test_refuses_overwrite_without_reconfig(self):
         with tempfile.TemporaryDirectory() as d:

@@ -195,7 +195,9 @@ def resolve_radiod_block(config: dict, radiod_id: str | None) -> dict:
     """Find the [[radiod]] block matching radiod_id.
 
     Resolution order:
-      1. Match an explicit [[radiod]] block in the config.
+      1. Match an explicit [[radiod]] block via `status` (new canonical
+         field per RADIOD-IDENTIFICATION.md §3.1) or `id` (legacy,
+         emits DeprecationWarning).
       2. If no match (or no blocks at all) and /etc/radio/radiod@<id>.conf
          exists locally, synthesize a block from the conf's `status =` line.
          This matches the wsprdaemon-client convention: the radiod conf is
@@ -210,17 +212,31 @@ def resolve_radiod_block(config: dict, radiod_id: str | None) -> dict:
 
     # Explicit match first
     if radiod_id is not None:
+        # New canonical: match on `status` (multicast name).
+        for block in radiod_blocks:
+            if block.get("status") == radiod_id:
+                return block
+        # Legacy fallback: match on `id` (local label).
         for block in radiod_blocks:
             if block.get("id") == radiod_id:
+                warnings.warn(
+                    f"[[radiod]] block matched on legacy `id` field "
+                    f"({radiod_id!r}); rename to `status` per "
+                    "RADIOD-IDENTIFICATION.md §3.1",
+                    DeprecationWarning, stacklevel=2,
+                )
                 return block
         # Fall through to filesystem
         synth = _synthesize_radiod_block_from_conf(radiod_id)
         if synth is not None:
             return synth
-        available = [b.get("id", "<unnamed>") for b in radiod_blocks]
+        available = [
+            b.get("status") or b.get("id", "<unnamed>")
+            for b in radiod_blocks
+        ]
         raise ValueError(
-            f"No [[radiod]] block with id={radiod_id!r} in config and "
-            f"no /etc/radio/radiod@{radiod_id}.conf on disk. "
+            f"No [[radiod]] block with status or id={radiod_id!r} in "
+            f"config and no /etc/radio/radiod@{radiod_id}.conf on disk. "
             f"Config blocks: {available or ['(none)']}."
         )
 
@@ -271,22 +287,42 @@ def get_enabled_bands(radiod_block: dict) -> list[HfdlBand]:
 
 
 def resolve_radiod_status(radiod_block: dict) -> str:
-    """Resolve the radiod mDNS hostname.
+    """Resolve the radiod mDNS control/status multicast name.
 
-    Precedence:
-      1. RADIOD_<ID>_STATUS from environment (sigmond-supplied)
-      2. radiod_status field in the [[radiod]] block (standalone fallback)
+    Precedence (RADIOD-IDENTIFICATION.md §3.1 + §6):
+      1. New canonical: ``block["status"]`` (the multicast name).
+         No env-var override needed since it's operator-set.
+      2. Legacy: ``RADIOD_<ID>_STATUS`` env (DeprecationWarning).
+      3. Legacy: ``block["radiod_status"]`` (DeprecationWarning).
     """
+    # New canonical path.
+    status = radiod_block.get("status")
+    if status:
+        return status
+
+    # Legacy paths fire DeprecationWarning.
     radiod_id = radiod_block.get("id", "")
     env_key = f"RADIOD_{radiod_id.upper().replace('-', '_')}_STATUS"
     from_env = os.environ.get(env_key)
     if from_env:
+        warnings.warn(
+            f"using legacy env override {env_key}; declare "
+            "[[radiod]] status instead per RADIOD-IDENTIFICATION.md §3.1",
+            DeprecationWarning, stacklevel=2,
+        )
         return from_env
 
-    status = radiod_block.get("radiod_status")
-    if not status:
+    legacy_status = radiod_block.get("radiod_status")
+    if not legacy_status:
         raise ValueError(
-            f"[[radiod]] id={radiod_id!r} has no radiod_status and "
-            f"{env_key} is not set in the environment"
+            f"[[radiod]] block has no `status` field declared "
+            f"(id={radiod_id!r} legacy fields also absent); see "
+            "RADIOD-IDENTIFICATION.md §3.1 — operator should set "
+            "`status = \"<mDNS-multicast-name>\"`"
         )
-    return status
+    warnings.warn(
+        "[[radiod]] radiod_status is deprecated; rename to "
+        "[[radiod]] status per RADIOD-IDENTIFICATION.md §3.1",
+        DeprecationWarning, stacklevel=2,
+    )
+    return legacy_status
