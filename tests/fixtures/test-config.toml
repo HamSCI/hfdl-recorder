@@ -15,8 +15,7 @@ local_json   = true
 airframes_io = false
 
 [[radiod]]
-id            = "test-rx888"
-radiod_status = "test-rx888-status.local"
+status = "test-rx888-status.local"
 
 [radiod.bands]
 enabled = ["HFDL21", "HFDL13", "HFDL5"]

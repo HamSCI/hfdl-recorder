@@ -184,25 +184,22 @@ def _synthesize_radiod_block_from_conf(radiod_id: str) -> dict | None:
     if not status:
         return None
     return {
-        "id":            radiod_id,
-        "radiod_status": status,
-        "bands":         {"enabled": list(_DEFAULT_HFDL_BANDS)},
-        "_source":       f"synthesized from {conf}",
+        "status":   status,
+        "bands":    {"enabled": list(_DEFAULT_HFDL_BANDS)},
+        "_source":  f"synthesized from {conf}",
     }
 
 
 def resolve_radiod_block(config: dict, radiod_id: str | None) -> dict:
     """Find the [[radiod]] block matching radiod_id.
 
-    Resolution order:
-      1. Match an explicit [[radiod]] block via `status` (new canonical
-         field per RADIOD-IDENTIFICATION.md §3.1) or `id` (legacy,
-         emits DeprecationWarning).
-      2. If no match (or no blocks at all) and /etc/radio/radiod@<id>.conf
-         exists locally, synthesize a block from the conf's `status =` line.
-         This matches the wsprdaemon-client convention: the radiod conf is
-         the canonical source of truth for the status DNS, so operators
-         shouldn't have to duplicate it in hfdl-recorder's config.
+    Resolution order (Phase 6 cutover —
+    RADIOD-IDENTIFICATION.md §3.1):
+      1. Match an explicit [[radiod]] block via the canonical
+         ``status`` field (the mDNS multicast name).
+      2. If no match (or no blocks at all) and
+         /etc/radio/radiod@<id>.conf exists locally, synthesize a
+         block from the conf's ``status =`` line.
       3. If radiod_id is None and exactly one /etc/radio/radiod@*.conf
          exists, autodetect that one.
     """
@@ -212,32 +209,20 @@ def resolve_radiod_block(config: dict, radiod_id: str | None) -> dict:
 
     # Explicit match first
     if radiod_id is not None:
-        # New canonical: match on `status` (multicast name).
         for block in radiod_blocks:
             if block.get("status") == radiod_id:
-                return block
-        # Legacy fallback: match on `id` (local label).
-        for block in radiod_blocks:
-            if block.get("id") == radiod_id:
-                warnings.warn(
-                    f"[[radiod]] block matched on legacy `id` field "
-                    f"({radiod_id!r}); rename to `status` per "
-                    "RADIOD-IDENTIFICATION.md §3.1",
-                    DeprecationWarning, stacklevel=2,
-                )
                 return block
         # Fall through to filesystem
         synth = _synthesize_radiod_block_from_conf(radiod_id)
         if synth is not None:
             return synth
-        available = [
-            b.get("status") or b.get("id", "<unnamed>")
-            for b in radiod_blocks
-        ]
+        available = [b.get("status", "<unnamed>") for b in radiod_blocks]
         raise ValueError(
-            f"No [[radiod]] block with status or id={radiod_id!r} in "
+            f"No [[radiod]] block with status={radiod_id!r} in "
             f"config and no /etc/radio/radiod@{radiod_id}.conf on disk. "
-            f"Config blocks: {available or ['(none)']}."
+            f"Config blocks: {available or ['(none)']}.  "
+            "If you see legacy `id`/`radiod_status` fields in the "
+            "config, run `sudo smd radiod migrate --yes`."
         )
 
     # radiod_id is None → either pick the one config block, or autodetect
@@ -289,40 +274,17 @@ def get_enabled_bands(radiod_block: dict) -> list[HfdlBand]:
 def resolve_radiod_status(radiod_block: dict) -> str:
     """Resolve the radiod mDNS control/status multicast name.
 
-    Precedence (RADIOD-IDENTIFICATION.md §3.1 + §6):
-      1. New canonical: ``block["status"]`` (the multicast name).
-         No env-var override needed since it's operator-set.
-      2. Legacy: ``RADIOD_<ID>_STATUS`` env (DeprecationWarning).
-      3. Legacy: ``block["radiod_status"]`` (DeprecationWarning).
+    Reads the canonical ``status`` field per
+    RADIOD-IDENTIFICATION.md §3.1.  Phase 6 cutover (this release)
+    removed the legacy paths (``RADIOD_<ID>_STATUS`` env override
+    and ``radiod_status`` field) — operators with legacy configs
+    must run ``sudo smd radiod migrate --yes``.
     """
-    # New canonical path.
     status = radiod_block.get("status")
-    if status:
-        return status
-
-    # Legacy paths fire DeprecationWarning.
-    radiod_id = radiod_block.get("id", "")
-    env_key = f"RADIOD_{radiod_id.upper().replace('-', '_')}_STATUS"
-    from_env = os.environ.get(env_key)
-    if from_env:
-        warnings.warn(
-            f"using legacy env override {env_key}; declare "
-            "[[radiod]] status instead per RADIOD-IDENTIFICATION.md §3.1",
-            DeprecationWarning, stacklevel=2,
-        )
-        return from_env
-
-    legacy_status = radiod_block.get("radiod_status")
-    if not legacy_status:
+    if not status:
         raise ValueError(
-            f"[[radiod]] block has no `status` field declared "
-            f"(id={radiod_id!r} legacy fields also absent); see "
-            "RADIOD-IDENTIFICATION.md §3.1 — operator should set "
-            "`status = \"<mDNS-multicast-name>\"`"
+            "[[radiod]] block has no `status` field.  Run "
+            "`sudo smd radiod migrate --yes` if this config still "
+            "uses the legacy `radiod_status` field."
         )
-    warnings.warn(
-        "[[radiod]] radiod_status is deprecated; rename to "
-        "[[radiod]] status per RADIOD-IDENTIFICATION.md §3.1",
-        DeprecationWarning, stacklevel=2,
-    )
-    return legacy_status
+    return status

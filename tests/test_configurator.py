@@ -79,18 +79,17 @@ class FieldSubstitutionTests(unittest.TestCase):
     def test_radiod_field_replace_first_block(self):
         body = (
             '[[radiod]]\n'
-            'id            = "old1"\n'
-            'radiod_status = "old1.local"\n'
+            'status = "old1.local"\n'
             '\n'
             '[radiod.bands]\n'
             'enabled = ["HFDL13"]\n'
             '\n'
             '[[radiod]]\n'
-            'id            = "old2"\n'
+            'status = "old2.local"\n'
         )
-        out = configurator._replace_radiod_field(body, 0, 'id', 'NEW1')
-        self.assertIn('id            = "NEW1"', out)
-        self.assertIn('id            = "old2"', out)
+        out = configurator._replace_radiod_field(body, 0, 'status', 'NEW1.local')
+        self.assertIn('status = "NEW1.local"', out)
+        self.assertIn('status = "old2.local"', out)
 
 
 class InitCommandTests(unittest.TestCase):
@@ -154,7 +153,8 @@ class InitCommandTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             text = target.read_text()
             self.assertIn('"YOURCALL-1"', text)
-            self.assertIn('"my-rx888"', text)
+            # Phase 6: `status` is the only canonical radiod field.
+            self.assertIn('status = "my-rx888-status.local"', text)
 
 
 class EditCommandTests(unittest.TestCase):
@@ -165,8 +165,7 @@ class EditCommandTests(unittest.TestCase):
             'grid_square = "AA00aa"\n'
             '\n'
             '[[radiod]]\n'
-            'id            = "old"\n'
-            'radiod_status = "old.local"\n'
+            'status = "old.local"\n'
             '\n'
             '[radiod.bands]\n'
             'enabled = ["HFDL13"]\n'

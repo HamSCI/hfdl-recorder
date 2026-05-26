@@ -38,7 +38,7 @@ def test_load_config_missing_file(tmp_path):
 def test_resolve_radiod_block_single():
     cfg = load_config(FIXTURE)
     block = resolve_radiod_block(cfg, None)
-    assert block["id"] == "test-rx888"
+    assert block["status"] == "test-rx888-status.local"
 
 
 def test_resolve_radiod_block_unknown_id():
@@ -75,8 +75,7 @@ def test_resolve_radiod_status_from_field():
     assert resolve_radiod_status(block) == "test-rx888-status.local"
 
 
-def test_resolve_radiod_status_env_override(monkeypatch):
-    cfg = load_config(FIXTURE)
-    block = resolve_radiod_block(cfg, None)
-    monkeypatch.setenv("RADIOD_TEST_RX888_STATUS", "override.local")
-    assert resolve_radiod_status(block) == "override.local"
+def test_resolve_radiod_status_missing_raises():
+    """Phase 6: a block without `status` is rejected, not back-filled."""
+    with pytest.raises(ValueError):
+        resolve_radiod_status({})

@@ -43,19 +43,17 @@ def build_inventory(config: dict, config_path: Path) -> dict:
     all_log_paths: dict[str, Any] = {}
 
     for block in radiod_blocks:
-        radiod_id = block.get("id", "default")
+        # Phase 6 cutover (RADIOD-IDENTIFICATION.md §3.1): the mDNS
+        # multicast status name IS the identifier.
+        status_dns = resolve_radiod_status(block)
+        radiod_id = status_dns
         try:
             bands = get_enabled_bands(block)
         except ValueError:
             bands = []
 
-        try:
-            status_dns = resolve_radiod_status(block)
-        except ValueError:
-            status_dns = block.get("radiod_status", "")
-
         chain_delay_env = (
-            f"RADIOD_{radiod_id.upper().replace('-', '_')}_CHAIN_DELAY_NS"
+            f"RADIOD_{radiod_id.upper().replace('-', '_').replace('.', '_')}_CHAIN_DELAY_NS"
         )
         chain_delay_raw = os.environ.get(chain_delay_env)
         chain_delay = int(chain_delay_raw) if chain_delay_raw else None
@@ -88,10 +86,8 @@ def build_inventory(config: dict, config_path: Path) -> dict:
 
         # RADIOD-IDENTIFICATION.md §3.2 — inventory radiod_id is the
         # mDNS control/status multicast name (the only functional
-        # identifier).  Fall back to the local label when no status
-        # is declared so legacy configs still produce parseable
-        # inventory.
-        inventory_radiod_id = status_dns or radiod_id
+        # identifier).
+        inventory_radiod_id = status_dns
         instance = {
             "instance": radiod_id,
             "radiod_id": inventory_radiod_id,
@@ -236,18 +232,16 @@ def _collect_issues(config: dict, paths: dict) -> list[dict]:
         })
 
     for block in radiod_blocks:
-        rid = block.get("id", "<unnamed>")
-        if not block.get("radiod_status"):
-            env_key = f"RADIOD_{rid.upper().replace('-', '_')}_STATUS"
-            if not os.environ.get(env_key):
-                issues.append({
-                    "severity": "fail",
-                    "instance": rid,
-                    "message": (
-                        f"radiod_status not set and {env_key} not in "
-                        f"environment"
-                    ),
-                })
+        rid = block.get("status", "<unnamed>")
+        if not block.get("status"):
+            issues.append({
+                "severity": "fail",
+                "instance": rid,
+                "message": (
+                    "[[radiod]] block has no `status` field "
+                    "(mDNS multicast name)"
+                ),
+            })
 
         names = get_enabled_band_names(block)
         if not names:

@@ -63,7 +63,7 @@ def cmd_config_init(args) -> int:
     target.write_text(body)
     _ok(f"wrote {target}")
     _info(f"station_id: {values['station_id']}    grid: {values['grid']}")
-    _info(f"radiod:     id={values['radiod_id']}  status={values['radiod_status']}")
+    _info(f"radiod:     status={values['radiod_status']}")
     _info("")
     _info("Next steps:")
     _info(f"  1. Review [radiod.bands].enabled in {target}")
@@ -71,7 +71,7 @@ def cmd_config_init(args) -> int:
           f"at https://app.airframes.io")
     _info(f"  3. Validate: hfdl-recorder validate --json")
     _info(f"  4. Start:    sudo systemctl enable --now "
-          f"hfdl-recorder@{values['radiod_id']}.service")
+          f"hfdl-recorder@{values['radiod_status']}.service")
     return 0
 
 
@@ -94,22 +94,18 @@ def cmd_config_edit(args) -> int:
     block, block_index = _select_radiod_block(blocks, args)
     if block is None:
         return 1
-    cur_id     = block.get("id", "")
-    cur_status = block.get("radiod_status", "")
+    cur_status = block.get("status", "")
 
     if getattr(args, "non_interactive", False):
         _info(f"station.station_id    = {cur_station}")
         _info(f"station.grid_square   = {cur_grid}")
-        _info(f"radiod[{block_index}].id            = {cur_id}")
-        _info(f"radiod[{block_index}].radiod_status = {cur_status}")
+        _info(f"radiod[{block_index}].status = {cur_status}")
         return 0
 
     new_station = _prompt("station_id (airframes.io registration)",
                           cur_station or _default_station_id())
     new_grid    = _prompt("Grid square",
                           cur_grid or os.environ.get("STATION_GRID", ""))
-    new_id      = _prompt("Radiod id",
-                          cur_id or os.environ.get("SIGMOND_INSTANCE", ""))
     new_status  = _prompt("Radiod status DNS",
                           cur_status or
                           os.environ.get("SIGMOND_RADIOD_STATUS", ""))
@@ -117,8 +113,7 @@ def cmd_config_edit(args) -> int:
     body = target.read_text()
     body = _replace_station_field(body, "station_id",  new_station)
     body = _replace_station_field(body, "grid_square", new_grid)
-    body = _replace_radiod_field(body, block_index, "id",            new_id)
-    body = _replace_radiod_field(body, block_index, "radiod_status", new_status)
+    body = _replace_radiod_field(body, block_index, "status", new_status)
 
     if body == target.read_text():
         _info("no changes")
@@ -236,7 +231,6 @@ def _collect_init_values(args) -> dict:
         return {
             "station_id":    default_station,
             "grid":          grid or "AA00aa",
-            "radiod_id":     instance or "my-rx888",
             "radiod_status": radiod_status,
         }
 
@@ -249,25 +243,11 @@ def _collect_init_values(args) -> dict:
     radiod_status = _pick_radiod_status_from_discovery(
         discovered, status, instance)
 
-    # Legacy local label — Phase 6 cutover removes this prompt.
-    radiod_id_default = instance or _derive_label_from_status(radiod_status)
-    radiod_id   = _prompt("Radiod id (local label — legacy, will be retired)",
-                          radiod_id_default, required=True)
     return {
         "station_id":    station_id,
         "grid":          grid_square,
-        "radiod_id":     radiod_id,
         "radiod_status": radiod_status,
     }
-
-
-def _derive_label_from_status(status: str) -> str:
-    """Strip mDNS suffixes for a default local label."""
-    base = (status or "").strip()
-    for suffix in ("-status.local", ".local"):
-        if base.endswith(suffix):
-            return base[: -len(suffix)]
-    return base or "default"
 
 
 def _apply_init_substitutions(body: str, values: dict) -> str:
@@ -297,10 +277,10 @@ def _select_radiod_block(blocks: list[dict], args) -> tuple:
 
     if target_id:
         for i, b in enumerate(blocks):
-            if b.get("id") == target_id:
+            if b.get("status") == target_id:
                 return b, i
-        _err(f"no [[radiod]] block with id={target_id!r}; "
-             f"available: {', '.join(b.get('id', '?') for b in blocks)}")
+        _err(f"no [[radiod]] block with status={target_id!r}; "
+             f"available: {', '.join(b.get('status', '?') for b in blocks)}")
         return None, -1
 
     if len(blocks) == 1:

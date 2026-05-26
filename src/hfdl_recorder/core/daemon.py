@@ -42,7 +42,8 @@ class HfdlRecorder:
     ):
         self._config = config
         self._radiod = radiod_block
-        self._radiod_id = radiod_block.get("id", "default")
+        # Phase 6: canonical identifier is the mDNS status name.
+        self._radiod_id = resolve_radiod_status(radiod_block)
         # Phase-5 (sigmond MULTI-INSTANCE-ARCHITECTURE.md §3): per-
         # instance reporter ID.  None on legacy single-instance hosts;
         # ChTailer falls back to radiod_id at row construction.

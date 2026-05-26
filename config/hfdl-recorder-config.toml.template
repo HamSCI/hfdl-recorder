@@ -42,13 +42,6 @@ airframes_io = false  # opt-in: TCP push to feed.airframes.io:5556
 # the operator runs the configurator.
 status = "<configure-via-config-init>"
 
-# Legacy fields below are accepted during the Phase 3 deprecation
-# window (RADIOD-IDENTIFICATION.md §6).  Greenfield installs should
-# leave them out; existing deployments can keep them until the
-# operator runs the configurator to migrate to the `status` field.
-# id            = "my-rx888"
-# radiod_status = "my-rx888-status.local"   # mDNS, never IP
-
 [radiod.bands]
 # Curated default: high-yield bands across day/night propagation.
 # Valid names match the radiod section names in 51-hfdl.conf:

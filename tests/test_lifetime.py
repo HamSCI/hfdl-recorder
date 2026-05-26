@@ -55,7 +55,7 @@ class ConfigDefaultsTests(unittest.TestCase):
 
     def _minimal_radiod(self) -> str:
         return (
-            '[[radiod]]\nid = "x"\nradiod_status = "host"\n'
+            '[[radiod]]\nstatus = "host"\n'
             '[radiod.bands]\nenabled = ["HFDL21"]\n'
         )
 
@@ -147,7 +147,7 @@ class _DaemonForKeepAliveTests:
             "paths": {}, "station": {}, "sinks": {},
             "processing": {"radiod_lifetime_frames": lifetime_frames},
         }
-        radiod = {"id": "test", "radiod_status": "host"}
+        radiod = {"status": "host"}
         return HfdlRecorder(cfg, radiod)
 
 
