@@ -16,7 +16,7 @@ NotifyAccess=main
 EnvironmentFile=-/etc/sigmond/coordination.env
 EnvironmentFile=-/etc/hfdl-recorder/env/%i.env
 
-WorkingDirectory=/opt/hfdl-recorder
+WorkingDirectory=/opt/git/sigmond/hfdl-recorder
 
 ExecStartPre=+/bin/mkdir -p /var/lib/hfdl-recorder/%i
 ExecStartPre=+/bin/mkdir -p /var/log/hfdl-recorder
@@ -31,7 +31,7 @@ ExecStartPre=+/usr/bin/chown -R hfdlrec:hfdlrec /var/log/hfdl-recorder
 # deprecation warning.  --radiod-id %i stays for the legacy fallback
 # path; --config is intentionally omitted (explicit_path wins in
 # resolve_config_path, which would force the legacy path forever).
-ExecStart=/opt/hfdl-recorder/venv/bin/python3 -m hfdl_recorder.cli daemon \
+ExecStart=/opt/git/sigmond/hfdl-recorder/venv/bin/python3 -m hfdl_recorder.cli daemon \
     --instance %i \
     --radiod-id %i
 
@@ -55,7 +55,7 @@ PrivateTmp=false
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/lib/hfdl-recorder /var/log/hfdl-recorder
-ReadOnlyPaths=/etc/hfdl-recorder /opt/hfdl-recorder
+ReadOnlyPaths=/etc/hfdl-recorder /opt/git/sigmond/hfdl-recorder
 PrivateNetwork=false
 
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE

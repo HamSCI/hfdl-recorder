@@ -6,8 +6,8 @@
 # What it does:
 #   1. Creates service user hfdlrec:hfdlrec
 #   2. Clones/links repo to /opt/git/sigmond/hfdl-recorder
-#   3. Creates venv at /opt/hfdl-recorder/venv with editable install
-#   4. Builds libacars + dumphfdl into /opt/hfdl-recorder/bin
+#   3. Creates venv at /opt/git/sigmond/hfdl-recorder/venv with editable install
+#   4. Builds libacars + dumphfdl into /opt/git/sigmond/hfdl-recorder/bin
 #      (skip with --no-build if dumphfdl is already on disk)
 #   5. Renders config template (non-destructive — never overwrites)
 #   6. Installs systemd unit template
@@ -21,7 +21,7 @@ set -euo pipefail
 SERVICE_USER="hfdlrec"
 SERVICE_GROUP="hfdlrec"
 REPO_SOURCE="/opt/git/sigmond/hfdl-recorder"
-PREFIX="/opt/hfdl-recorder"
+PREFIX="/opt/git/sigmond/hfdl-recorder"
 VENV_DIR="${PREFIX}/venv"
 CONFIG_DIR="/etc/hfdl-recorder"
 CONFIG_FILE="${CONFIG_DIR}/hfdl-recorder-config.toml"

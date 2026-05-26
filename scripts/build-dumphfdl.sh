@@ -4,10 +4,10 @@
 # Usage: sudo ./scripts/build-dumphfdl.sh [--force] [--no-apt]
 #
 # Builds libacars + dumphfdl from source into HFDL_RECORDER_PREFIX
-# (default /opt/hfdl-recorder). Skips work that is already up to date.
+# (default /opt/git/sigmond/hfdl-recorder). Skips work that is already up to date.
 #
 # Honors these env vars:
-#   HFDL_RECORDER_PREFIX     install prefix         (default: /opt/hfdl-recorder)
+#   HFDL_RECORDER_PREFIX     install prefix         (default: /opt/git/sigmond/hfdl-recorder)
 #   HFDL_RECORDER_BUILD_DIR  scratch build dir      (default: /var/cache/hfdl-recorder/build)
 #   LIBACARS_REF             git ref for libacars   (default: master)
 #   DUMPHFDL_REF             git ref for dumphfdl   (default: master)
@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-PREFIX="${HFDL_RECORDER_PREFIX:-/opt/hfdl-recorder}"
+PREFIX="${HFDL_RECORDER_PREFIX:-/opt/git/sigmond/hfdl-recorder}"
 BUILD_DIR="${HFDL_RECORDER_BUILD_DIR:-/var/cache/hfdl-recorder/build}"
 LIBACARS_URL="${LIBACARS_URL:-https://github.com/szpajder/libacars.git}"
 DUMPHFDL_URL="${DUMPHFDL_URL:-https://github.com/szpajder/dumphfdl.git}"

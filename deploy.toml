@@ -16,19 +16,19 @@ edit = ["/usr/local/bin/hfdl-recorder", "config", "edit"]
 
 [build]
 steps = [
-    "python3 -m venv /opt/hfdl-recorder/venv",
-    "/opt/hfdl-recorder/venv/bin/pip install --upgrade pip setuptools wheel",
-    "/opt/hfdl-recorder/venv/bin/pip install -e /opt/git/sigmond/hfdl-recorder",
+    "python3 -m venv /opt/git/sigmond/hfdl-recorder/venv",
+    "/opt/git/sigmond/hfdl-recorder/venv/bin/pip install --upgrade pip setuptools wheel",
+    "/opt/git/sigmond/hfdl-recorder/venv/bin/pip install -e /opt/git/sigmond/hfdl-recorder",
     "/opt/git/sigmond/hfdl-recorder/scripts/build-dumphfdl.sh",
 ]
 produces = [
-    "/opt/hfdl-recorder/venv/bin/hfdl-recorder",
-    "/opt/hfdl-recorder/bin/dumphfdl",
+    "/opt/git/sigmond/hfdl-recorder/venv/bin/hfdl-recorder",
+    "/opt/git/sigmond/hfdl-recorder/bin/dumphfdl",
 ]
 
 [[install.steps]]
 kind = "link"
-src  = "/opt/hfdl-recorder/venv/bin/hfdl-recorder"
+src  = "/opt/git/sigmond/hfdl-recorder/venv/bin/hfdl-recorder"
 dst  = "/usr/local/bin/hfdl-recorder"
 
 [[install.steps]]
@@ -69,7 +69,7 @@ templated_units = ["hfdl-recorder@.service"]
 [deps]
 [[deps.binary]]
 name = "dumphfdl"
-note = "Built from source by scripts/build-dumphfdl.sh into /opt/hfdl-recorder/bin/"
+note = "Built from source by scripts/build-dumphfdl.sh into /opt/git/sigmond/hfdl-recorder/bin/"
 
 [[deps.git]]
 name = "ka9q-radio"
@@ -79,4 +79,4 @@ note = "provides radiod IQ multicast; HFDL fragment in config/fragments/hfdl.con
 [[deps.pypi]]
 name    = "ka9q-python"
 version = "3.8.0"
-venv    = "/opt/hfdl-recorder/venv"
+venv    = "/opt/git/sigmond/hfdl-recorder/venv"
