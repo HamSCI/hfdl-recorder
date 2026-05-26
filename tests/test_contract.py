@@ -36,7 +36,10 @@ def test_inventory_instance_shape():
     assert len(inv["instances"]) == 1
     inst = inv["instances"][0]
     assert inst["instance"] == "test-rx888"
-    assert inst["radiod_id"] == "test-rx888"
+    # RADIOD-IDENTIFICATION.md §3.2: inventory radiod_id is the mDNS
+    # multicast status name, not the local `[[radiod]] id` label.
+    # Fixture has radiod_status="test-rx888-status.local".
+    assert inst["radiod_id"] == "test-rx888-status.local"
     assert inst["modes"] == ["hfdl"]
     assert inst["bands"] == ["HFDL21", "HFDL13", "HFDL5"]
     assert inst["ka9q_channels"] == 3
