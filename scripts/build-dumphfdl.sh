@@ -97,9 +97,14 @@ build_one() {
     local stamp="$build/.installed-rev"
     local current_rev
     current_rev=$(git -C "$src" rev-parse HEAD)
+    # Stamp records "<rev>@<install-prefix>" so a PREFIX change re-installs
+    # even when the source rev is unchanged.  A bare-rev stamp from older
+    # builds doesn't match the new format, so it triggers a rebuild — that
+    # gets the binaries into the right prefix on first run after the fix.
+    local stamp_content="${current_rev}@${PREFIX}"
 
-    if ! $FORCE && [[ -f "$stamp" ]] && [[ "$(cat "$stamp")" == "$current_rev" ]]; then
-        ui_info "$name @ $current_rev already installed; skipping (use --force to rebuild)"
+    if ! $FORCE && [[ -f "$stamp" ]] && [[ "$(cat "$stamp")" == "$stamp_content" ]]; then
+        ui_info "$name @ $current_rev already installed at $PREFIX; skipping (use --force to rebuild)"
         return
     fi
 
@@ -120,7 +125,7 @@ build_one() {
     ui_info "Installing $name to $PREFIX"
     cmake --install "$build" >/dev/null
 
-    echo "$current_rev" > "$stamp"
+    echo "$stamp_content" > "$stamp"
 }
 
 build_autotools() {
@@ -129,9 +134,10 @@ build_autotools() {
     local stamp="$src/.installed-rev"
     local current_rev
     current_rev=$(git -C "$src" rev-parse HEAD)
+    local stamp_content="${current_rev}@${PREFIX}"
 
-    if ! $FORCE && [[ -f "$stamp" ]] && [[ "$(cat "$stamp")" == "$current_rev" ]]; then
-        ui_info "$name @ $current_rev already installed; skipping (use --force to rebuild)"
+    if ! $FORCE && [[ -f "$stamp" ]] && [[ "$(cat "$stamp")" == "$stamp_content" ]]; then
+        ui_info "$name @ $current_rev already installed at $PREFIX; skipping (use --force to rebuild)"
         return
     fi
 
@@ -164,7 +170,7 @@ build_autotools() {
             sed -i '/^#include <time.h>/a #include <stdarg.h>' "$lhdr"
         fi
     )
-    echo "$current_rev" > "$stamp"
+    echo "$stamp_content" > "$stamp"
 }
 
 main() {
