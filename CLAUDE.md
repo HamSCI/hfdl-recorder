@@ -16,6 +16,14 @@ It is part of the HamSCI sigmond suite — see
 the same Pattern A install layout and contract surface as `psk-recorder`,
 `wspr-recorder`, and `hf-timestd`.
 
+Documentation layout:
+
+- `README.md` — top-level summary + install + airframes.io setup.
+- `docs/HFDL.md` — what HFDL is, how the worldwide network is
+  constructed, what its transmissions carry, and why it is
+  valuable as an opportunistic propagation source for HamSCI.
+- this file — developer / operator briefing.
+
 ## Authors
 
 - Michael Hauan (AC0G, GitHub: mijahauan)
