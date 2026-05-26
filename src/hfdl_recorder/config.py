@@ -79,7 +79,7 @@ def extract_reporter_id(config_or_path) -> Optional[str]:
 
 DEFAULTS: dict[str, Any] = {
     "paths": {
-        "dumphfdl":  "/opt/hfdl-recorder/bin/dumphfdl",
+        "dumphfdl":  "/opt/git/sigmond/hfdl-recorder/bin/dumphfdl",
         "spool_dir": "/var/lib/hfdl-recorder",
         "log_dir":   "/var/log/hfdl-recorder",
         "systable":  "/var/lib/hfdl-recorder/systable.conf",

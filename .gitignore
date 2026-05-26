@@ -9,3 +9,10 @@ build/
 # Virtual environments
 venv/
 .venv/
+
+# Build artifacts from scripts/build-dumphfdl.sh (PREFIX=$(repo root)).
+# Source lives in /var/cache/hfdl-recorder/build/.
+/bin/
+/lib/
+/include/
+/share/

@@ -125,7 +125,7 @@ deploy.toml           # Sigmond deploy manifest
   @ 277.2 kS/s); GIL releases during socket recv and subprocess write.
 - **dumphfdl is the decoder.** No reimplementation; libacars + dumphfdl
   encode >15k LOC of mature C with years of FER tuning. Built from source
-  by `scripts/build-dumphfdl.sh` into `/opt/hfdl-recorder/bin/dumphfdl`.
+  by `scripts/build-dumphfdl.sh` into `/opt/git/sigmond/hfdl-recorder/bin/dumphfdl`.
 - **ka9q-python owns multicast destination** — we never pass
   `destination=` to `ensure_channel()`. Inventory reports the resolved
   address read back from `ChannelInfo`.
@@ -176,7 +176,7 @@ Sections implemented:
 
 - **dumphfdl** (https://github.com/szpajder/dumphfdl) — HFDL waveform
   decoder. Built by `scripts/build-dumphfdl.sh` into
-  `/opt/hfdl-recorder/bin/dumphfdl`.
+  `/opt/git/sigmond/hfdl-recorder/bin/dumphfdl`.
 - **libacars** (https://github.com/szpajder/libacars) — ACARS upper-layer
   parser library. Build dependency of dumphfdl; same script handles both.
 - **ka9q-radio radiod** with the HFDL channel fragment loaded
@@ -190,9 +190,9 @@ Sections implemented:
 - Per-band logs: `/var/log/hfdl-recorder/<radiod_id>-<BAND>.log` (dumphfdl stderr)
 - Process log: systemd journal (`StandardOutput=journal`) —
   `journalctl -u hfdl-recorder@<radiod_id>` or `smd log hfdl-recorder`
-- Venv: `/opt/hfdl-recorder/venv`
+- Venv: `/opt/git/sigmond/hfdl-recorder/venv`
 - Source: `/opt/git/sigmond/hfdl-recorder` (editable install)
-- dumphfdl binary: `/opt/hfdl-recorder/bin/dumphfdl`
+- dumphfdl binary: `/opt/git/sigmond/hfdl-recorder/bin/dumphfdl`
 - Service user: `hfdlrec:hfdlrec`
 
 ## Running Tests

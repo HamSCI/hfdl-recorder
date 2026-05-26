@@ -17,7 +17,7 @@ def _make_config(**overrides) -> dict:
     cfg = {
         "station": {"station_id": "TEST-1"},
         "paths": {
-            "dumphfdl":  "/opt/hfdl-recorder/bin/dumphfdl",
+            "dumphfdl":  "/opt/git/sigmond/hfdl-recorder/bin/dumphfdl",
             "spool_dir": "/var/lib/hfdl-recorder",
             "log_dir":   "/var/log/hfdl-recorder",
             "systable":  "/var/lib/hfdl-recorder/systable.conf",
@@ -37,7 +37,7 @@ def test_build_argv_hfdl21_default():
     )
     argv = pipeline.build_argv()
 
-    assert argv[0] == "/opt/hfdl-recorder/bin/dumphfdl"
+    assert argv[0] == "/opt/git/sigmond/hfdl-recorder/bin/dumphfdl"
     assert "--iq-file" in argv and "-" in argv
     # Sample format / rate.
     assert argv[argv.index("--sample-format") + 1] == "cf32"

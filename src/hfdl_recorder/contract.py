@@ -200,7 +200,7 @@ def _collect_issues(config: dict, paths: dict) -> list[dict]:
             "message": "sinks.airframes_io requires station.station_id",
         })
 
-    dumphfdl = paths.get("dumphfdl", "/opt/hfdl-recorder/bin/dumphfdl")
+    dumphfdl = paths.get("dumphfdl", "/opt/git/sigmond/hfdl-recorder/bin/dumphfdl")
     if not (shutil.which(dumphfdl) or Path(dumphfdl).is_file()):
         issues.append({
             "severity": "fail",

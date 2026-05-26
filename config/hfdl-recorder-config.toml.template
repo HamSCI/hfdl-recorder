@@ -15,7 +15,7 @@ station_id  = "YOURCALL-1"
 grid_square = "AA00aa"
 
 [paths]
-dumphfdl  = "/opt/hfdl-recorder/bin/dumphfdl"
+dumphfdl  = "/opt/git/sigmond/hfdl-recorder/bin/dumphfdl"
 spool_dir = "/var/lib/hfdl-recorder"
 log_dir   = "/var/log/hfdl-recorder"
 # dumphfdl reads + updates this systable as it learns ground-station IDs

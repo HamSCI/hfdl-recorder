@@ -192,7 +192,7 @@ class BandPipeline:
         without spawning a process.
         """
         dumphfdl = self._paths.get(
-            "dumphfdl", "/opt/hfdl-recorder/bin/dumphfdl"
+            "dumphfdl", "/opt/git/sigmond/hfdl-recorder/bin/dumphfdl"
         )
         systable = self._paths.get(
             "systable", "/var/lib/hfdl-recorder/systable.conf"

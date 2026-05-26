@@ -21,7 +21,7 @@ set -euo pipefail
 
 SERVICE_USER="hfdlrec"
 REPO_SOURCE="/opt/git/sigmond/hfdl-recorder"
-VENV_DIR="/opt/hfdl-recorder/venv"
+VENV_DIR="/opt/git/sigmond/hfdl-recorder/venv"
 
 ui_info()  { echo "[INFO]  $*"; }
 ui_warn()  { echo "[WARN]  $*" >&2; }
