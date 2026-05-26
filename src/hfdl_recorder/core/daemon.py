@@ -126,6 +126,33 @@ class HfdlRecorder:
                 encoding=HFDL_ENCODING,
                 lifetime=lifetime_arg,
             )
+            # Defensive: ensure_channel can return an existing SSRC at
+            # the right (freq, preset, sample_rate) but a stale
+            # encoding.  Observed on bee1 after the 2026-04-27 switch
+            # from HFDL_ENCODING=2 (s16be) → 4 (F32LE): five of seven
+            # bands kept reporting encoding=2 to discover_channels
+            # while the daemon believed it was running f32.  The
+            # consumer (dumphfdl, --sample-format cf32) then read the
+            # s16be bytes as float32 and produced silent garbage.
+            # Force the encoding when ensure_channel's return diverges
+            # from what we asked for, then re-read to confirm.
+            current_enc = getattr(info, "encoding", None)
+            if current_enc is not None and int(current_enc) != HFDL_ENCODING:
+                logger.warning(
+                    "%s: ensure_channel returned ssrc=%d with "
+                    "encoding=%d, expected %d — forcing via "
+                    "set_output_encoding",
+                    band.name, info.ssrc, int(current_enc), HFDL_ENCODING,
+                )
+                try:
+                    self._control.set_output_encoding(
+                        ssrc=info.ssrc, encoding=HFDL_ENCODING,
+                    )
+                except Exception:
+                    logger.exception(
+                        "%s: set_output_encoding(ssrc=%d, %d) failed",
+                        band.name, info.ssrc, HFDL_ENCODING,
+                    )
             # The "iq" preset's default channel filter is ±5 kHz — sized
             # for narrowband audio, not an HFDL band. Without this call,
             # radiod resamples a 10 kHz slice of spectrum up to the band
