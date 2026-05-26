@@ -161,6 +161,59 @@ def _default_station_id() -> str:
     return f"{call}-{index}"
 
 
+def _discover_radiods(timeout: float = 5.0) -> list[dict]:
+    """Return discovered radiods or [] on failure (lazy ka9q-python
+    import, avahi missing, etc.).  Per RADIOD-IDENTIFICATION.md §4."""
+    try:
+        from ka9q.discovery import discover_radiod_services
+        return discover_radiod_services(timeout=timeout) or []
+    except Exception:
+        return []
+
+
+def _pick_radiod_status_from_discovery(
+    discovered: list[dict], env_status: str, instance_hint: str,
+) -> str:
+    """Interactive discovery flow (zero / one / multi cases)."""
+    if not discovered:
+        print("\033[33m⚠\033[0m  No radiod instances broadcasting on the "
+              "local network.")
+        _info("Install + start radiod before continuing:")
+        _info("  sudo smd install ka9q-radio")
+        _info("Continuing with manual entry — the daemon will refuse to "
+              "start if the multicast name is unreachable.")
+        default = env_status or (
+            f"{instance_hint}-status.local" if instance_hint else "")
+        return _prompt("Radiod status DNS (manual entry)", default,
+                       required=True)
+
+    if len(discovered) == 1:
+        only = discovered[0]
+        _info(f"One radiod discovered: {only['hostname']!r} "
+              f"(advertised: {only['name']!r})")
+        confirm = _prompt(
+            f"Use {only['hostname']!r}? [Y/n]", "Y").strip().lower()
+        if confirm in ("", "y", "yes"):
+            return only["hostname"]
+        return _prompt("Radiod status DNS (manual entry)",
+                       env_status or only["hostname"], required=True)
+
+    _info("Multiple radiods discovered on the LAN:")
+    for i, svc in enumerate(discovered, 1):
+        _info(f"  [{i}] {svc['hostname']:<32} (advertised: {svc['name']!r})")
+    while True:
+        choice = _prompt(
+            f"Pick a radiod [1-{len(discovered)}]", "1").strip()
+        try:
+            idx = int(choice) - 1
+        except ValueError:
+            print("\033[33m⚠\033[0m  Enter a number from the menu.")
+            continue
+        if 0 <= idx < len(discovered):
+            return discovered[idx]["hostname"]
+        print(f"\033[33m⚠\033[0m  Out of range; pick 1-{len(discovered)}.")
+
+
 def _collect_init_values(args) -> dict:
     grid = os.environ.get("STATION_GRID", "")
     instance = os.environ.get("SIGMOND_INSTANCE", "")
@@ -168,28 +221,53 @@ def _collect_init_values(args) -> dict:
     default_station = _default_station_id() or "YOURCALL-1"
 
     if getattr(args, "non_interactive", False):
+        # Env wins; else single-radiod auto-pick; else placeholder.
+        if status:
+            radiod_status = status
+        else:
+            discovered = _discover_radiods()
+            if len(discovered) == 1:
+                radiod_status = discovered[0]["hostname"]
+            else:
+                radiod_status = (
+                    f"{instance}-status.local"
+                    if instance else "my-rx888-status.local"
+                )
         return {
             "station_id":    default_station,
             "grid":          grid or "AA00aa",
             "radiod_id":     instance or "my-rx888",
-            "radiod_status": status or (
-                f"{instance}-status.local" if instance else "my-rx888-status.local"
-            ),
+            "radiod_status": radiod_status,
         }
 
     station_id  = _prompt("station_id (airframes.io registration)",
                           default_station, required=True)
     grid_square = _prompt("Grid square", grid, required=True)
-    radiod_id   = _prompt("Radiod id (e.g. bee1-rx888)",
-                          instance, required=True)
-    default_status = status or f"{radiod_id}-status.local"
-    radiod_status = _prompt("Radiod status DNS", default_status, required=True)
+
+    # RADIOD-IDENTIFICATION.md §4 — discovery-driven radiod selection.
+    discovered = _discover_radiods()
+    radiod_status = _pick_radiod_status_from_discovery(
+        discovered, status, instance)
+
+    # Legacy local label — Phase 6 cutover removes this prompt.
+    radiod_id_default = instance or _derive_label_from_status(radiod_status)
+    radiod_id   = _prompt("Radiod id (local label — legacy, will be retired)",
+                          radiod_id_default, required=True)
     return {
         "station_id":    station_id,
         "grid":          grid_square,
         "radiod_id":     radiod_id,
         "radiod_status": radiod_status,
     }
+
+
+def _derive_label_from_status(status: str) -> str:
+    """Strip mDNS suffixes for a default local label."""
+    base = (status or "").strip()
+    for suffix in ("-status.local", ".local"):
+        if base.endswith(suffix):
+            return base[: -len(suffix)]
+    return base or "default"
 
 
 def _apply_init_substitutions(body: str, values: dict) -> str:
