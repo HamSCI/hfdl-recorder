@@ -27,7 +27,7 @@ def test_inventory_required_top_level_keys():
     ):
         assert key in inv, f"missing top-level inventory key: {key}"
     assert inv["client"] == "hfdl-recorder"
-    assert inv["contract_version"] == "0.7"
+    assert inv["contract_version"] == "0.8"
 
 
 def test_inventory_instance_shape():
