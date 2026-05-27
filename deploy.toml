@@ -80,3 +80,14 @@ note = "provides radiod IQ multicast; HFDL fragment in config/fragments/hfdl.con
 name    = "ka9q-python"
 version = "3.8.0"
 venv    = "/opt/git/sigmond/hfdl-recorder/venv"
+
+# ---------------------------------------------------------------------------
+# Sigmond UI hooks (drop-in registration for `smd watch` + TUI Activity).
+# Consumed by lib/sigmond/client_features.py.
+# ---------------------------------------------------------------------------
+
+[client_features.watch]
+verb         = "hfdl"
+description  = "HFDL per-band frame counts + GS/aircraft"
+verbose      = true
+per_instance = true
