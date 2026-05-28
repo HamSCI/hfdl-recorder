@@ -376,3 +376,239 @@ def _info(msg: str) -> None:
 
 def _err(msg: str) -> None:
     print(f"\033[31m✗\033[0m {msg}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# CLIENT-CONTRACT §14 — JSON config-roundtrip surface.
+#
+# `hfdl-recorder config show --json [--defaults]`   reads the TOML
+#   file on disk and emits it as JSON on stdout.  With `--defaults`,
+#   DEFAULTS is deep-merged into the file's content so every default
+#   key is present (the wizard uses this to populate every form
+#   field on a freshly-installed host).
+#
+# `hfdl-recorder config apply --json -`   reads a JSON dict from
+#   stdin, deep-merges it into the existing TOML file, and atomically
+#   rewrites the file.  Only sections in _APPLY_ALLOWED_SECTIONS are
+#   accepted; payload type-checking is structural only.  Comments
+#   and source ordering are NOT preserved — the file is rewritten
+#   from the merged dict.
+#
+# Pattern lifted from wspr-recorder commit ad8f637 and psk-recorder's
+# original implementation.  Difference vs wspr-recorder: `--defaults`
+# is functional here (hfdl-recorder has a canonical DEFAULTS dict in
+# config.py covering [paths], [sinks], [processing]).
+# ---------------------------------------------------------------------------
+
+import copy
+import json
+import tempfile
+
+from .config import DEFAULTS, DEFAULT_CONFIG_PATH
+
+
+# Sections allowed in the apply payload.  Matches hfdl-recorder's
+# actual schema: [station], [paths], [sinks], [processing], plus
+# `[[radiod]]` array-of-tables and the `[instance]` block prepended by
+# `smd instance migrate`.  Anything outside this set is rejected to
+# protect the file from typos and future schema additions reaching
+# disk without explicit review.
+_APPLY_ALLOWED_SECTIONS = {
+    "instance", "station", "paths", "sinks",
+    "processing", "radiod",
+}
+
+
+def cmd_config_show(args) -> int:
+    """Emit the on-disk TOML (or DEFAULTS-merged) as JSON on stdout."""
+    config_path = Path(getattr(args, "config", None) or DEFAULT_CONFIG_PATH)
+    if getattr(args, "defaults", False):
+        # DEFAULTS as the base, then the file's content overlays it.
+        # Sigmond's wizard uses this on first-run / freshly-installed
+        # hosts where the file may not yet have every key but the form
+        # should still render with sensible placeholders.
+        merged = copy.deepcopy(DEFAULTS)
+        if config_path.is_file():
+            try:
+                with open(config_path, "rb") as f:
+                    file_data = tomllib.load(f)
+                merged = _deep_merge(merged, file_data)
+            except (OSError, tomllib.TOMLDecodeError) as exc:
+                print(f"config show: cannot read {config_path}: {exc}",
+                      file=sys.stderr)
+                return 2
+        out = merged
+    else:
+        if not config_path.is_file():
+            out = {}
+        else:
+            try:
+                with open(config_path, "rb") as f:
+                    out = tomllib.load(f)
+            except (OSError, tomllib.TOMLDecodeError) as exc:
+                print(f"config show: cannot read {config_path}: {exc}",
+                      file=sys.stderr)
+                return 2
+    json.dump(out, sys.stdout, indent=2, sort_keys=True, default=str)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_config_apply(args) -> int:
+    """Read a JSON dict on stdin, validate, atomically write the TOML.
+
+    Section whitelist + structural type checks (each section must be
+    a table, except `radiod` which is a list of tables).  No per-key
+    type enforcement — sigmond's wizard owns input typing on its end.
+    """
+    config_path = Path(getattr(args, "config", None) or DEFAULT_CONFIG_PATH)
+
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError as exc:
+        print(f"config apply: stdin is not valid JSON: {exc}",
+              file=sys.stderr)
+        return 2
+
+    if not isinstance(payload, dict):
+        print(f"config apply: top-level JSON must be an object, "
+              f"got {type(payload).__name__}", file=sys.stderr)
+        return 2
+
+    unknown = set(payload.keys()) - _APPLY_ALLOWED_SECTIONS
+    if unknown:
+        print(f"config apply: section(s) not writable via apply: "
+              f"{sorted(unknown)} "
+              f"(allowed: {sorted(_APPLY_ALLOWED_SECTIONS)})",
+              file=sys.stderr)
+        return 2
+
+    for section, fields in payload.items():
+        if section == "radiod":
+            # Array-of-tables: structural check only.  The wizard pilot
+            # doesn't yet edit `[[radiod]]` for hfdl-recorder (that's
+            # the multi-band per-radiod-instance shape — a follow-up).
+            if not isinstance(fields, list):
+                print(f"config apply: [[radiod]] must be a list, "
+                      f"got {type(fields).__name__}", file=sys.stderr)
+                return 2
+            continue
+        if not isinstance(fields, dict):
+            print(f"config apply: [{section}] must be a table, "
+                  f"got {type(fields).__name__}", file=sys.stderr)
+            return 2
+
+    # Deep-merge with existing file.
+    if config_path.is_file():
+        with open(config_path, "rb") as f:
+            existing = tomllib.load(f)
+    else:
+        existing = {}
+    merged = _deep_merge(existing, payload)
+
+    text = _serialize_toml(merged)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = config_path.with_suffix(config_path.suffix + ".part")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        tmp.chmod(0o644)
+    except PermissionError:
+        pass
+    tmp.replace(config_path)
+    print(f"wrote {config_path}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Helpers (deep_merge + minimal TOML serializer).  Identical to the
+# wspr-recorder commit ad8f637 versions — could be lifted to a shared
+# sigmond library in a future cleanup, but inlined here per-client for
+# install-script self-containedness.
+# ---------------------------------------------------------------------------
+
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """Return a new dict where overlay's keys win over base's.
+
+    Nested dicts merge recursively; lists and scalars overwrite.
+    """
+    out = copy.deepcopy(base)
+    for k, v in overlay.items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = copy.deepcopy(v)
+    return out
+
+
+def _toml_scalar(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        s = repr(v)
+        if "." not in s and "e" not in s and "E" not in s:
+            s += ".0"
+        return s
+    if isinstance(v, str):
+        return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    raise TypeError(f"unsupported TOML scalar type: {type(v).__name__}")
+
+
+def _toml_inline_array(arr: list) -> str:
+    parts = []
+    for x in arr:
+        if isinstance(x, (str, bool, int, float)):
+            parts.append(_toml_scalar(x))
+        else:
+            parts.append(json.dumps(x))
+    return "[" + ", ".join(parts) + "]"
+
+
+def _serialize_toml(d: dict, parent: str = "") -> str:
+    """Serialize ``d`` to a deterministic TOML string.
+
+    Handles scalars, nested dicts (rendered as ``[section.child]``),
+    and arrays-of-tables (rendered as ``[[section]]``).  Arrays of
+    scalars render inline.  Does NOT preserve comments or original
+    ordering — keys are sorted within each section for determinism.
+    """
+    lines: list[str] = []
+    scalars: list[tuple[str, object]] = []
+    nested: list[tuple[str, dict]] = []
+    array_of_tables: list[tuple[str, list]] = []
+    for k in sorted(d.keys()):
+        v = d[k]
+        if isinstance(v, dict):
+            nested.append((k, v))
+        elif (isinstance(v, list) and v
+              and all(isinstance(item, dict) for item in v)):
+            array_of_tables.append((k, v))
+        else:
+            scalars.append((k, v))
+    if scalars:
+        if parent:
+            lines.append(f"[{parent}]")
+        for k, v in scalars:
+            if isinstance(v, list):
+                lines.append(f"{k} = {_toml_inline_array(v)}")
+            else:
+                lines.append(f"{k} = {_toml_scalar(v)}")
+        lines.append("")
+    for k, sub in nested:
+        header = f"{parent}.{k}" if parent else k
+        lines.append(_serialize_toml(sub, parent=header))
+    for k, blocks in array_of_tables:
+        header = f"{parent}.{k}" if parent else k
+        for block in blocks:
+            lines.append(f"[[{header}]]")
+            for bk in sorted(block.keys()):
+                bv = block[bk]
+                if isinstance(bv, dict):
+                    lines.append(_serialize_toml({bk: bv}, parent=header))
+                elif isinstance(bv, list):
+                    lines.append(f"{bk} = {_toml_inline_array(bv)}")
+                else:
+                    lines.append(f"{bk} = {_toml_scalar(bv)}")
+            lines.append("")
+    return "\n".join(lines)

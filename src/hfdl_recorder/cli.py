@@ -140,6 +140,23 @@ def main():
                           help="focus edits on a specific [[radiod]] block")
     _add_common(sub_edit)
 
+    # CLIENT-CONTRACT §14 JSON-roundtrip surface.  Sigmond's in-TUI
+    # Textual config wizard requires `show --json` + `apply --json -`;
+    # without them sigmond falls back to whiptail.  See configurator.
+    sub_show = cfg_sub.add_parser(
+        "show", help="emit current config (TOML→JSON) on stdout")
+    sub_show.add_argument("--json", action="store_true", default=True)
+    sub_show.add_argument("--defaults", action="store_true",
+                          help="merge DEFAULTS into the output")
+    _add_common(sub_show)
+
+    sub_apply = cfg_sub.add_parser(
+        "apply", help="apply a JSON payload (from stdin) to the config")
+    sub_apply.add_argument("--json", action="store_true", default=True)
+    sub_apply.add_argument("input", nargs="?", default="-",
+                           help="JSON payload path or `-` for stdin (default)")
+    _add_common(sub_apply)
+
     args = parser.parse_args()
 
     if args.log_level and not _contract_quiet:
@@ -172,7 +189,11 @@ def _handle_config(args):
         sys.exit(configurator.cmd_config_init(args))
     if sub == "edit":
         sys.exit(configurator.cmd_config_edit(args))
-    print("usage: hfdl-recorder config {init|edit} [--non-interactive]")
+    if sub == "show":
+        sys.exit(configurator.cmd_config_show(args))
+    if sub == "apply":
+        sys.exit(configurator.cmd_config_apply(args))
+    print("usage: hfdl-recorder config {init|edit|show|apply}")
     sys.exit(2)
 
 
