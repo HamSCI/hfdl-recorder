@@ -91,3 +91,9 @@ verb         = "hfdl"
 description  = "HFDL per-band frame counts + GS/aircraft"
 verbose      = true
 per_instance = true
+
+[client_features.receiver_channels]
+description  = "HFDL per-band wide IQ channels (one per enabled HFDL<N>)"
+per_instance = true
+parser_file  = "src/hfdl_recorder/sigmond_tui.py"
+parser_attr  = "parse_receiver_channels"
