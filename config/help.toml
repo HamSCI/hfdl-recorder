@@ -1,0 +1,105 @@
+# hfdl-recorder operator-help sidecar.
+#
+# Per-key title / help / example / validator_hint / required, matching
+# psk-recorder and mag-recorder's schema.  Plus the wizard-only flag
+# `hidden = true` (added 2026-05-29) — fields marked hidden are not
+# rendered in sigmond's in-TUI Textual wizard at all.  The on-disk TOML
+# value is preserved (apply uses deep-merge), so an operator who really
+# needs to override an invariant can edit the file directly with
+# `smd config edit hfdl-recorder` and the override survives.
+#
+# The design principle driving the hidden marks here: a per-instance
+# config file should hold ONLY values that VARY across installs or
+# instances.  Install-canonical paths (the dumphfdl binary, FHS spool
+# dirs, dumphfdl's runtime systable) never vary in practice — they're
+# install defaults, not operator knobs.  Marking them hidden keeps the
+# wizard's surface focused on what the operator actually decides:
+# station_id, grid_square, upload-sink opt-ins, and the radiod host.
+
+# --- Instance --------------------------------------------------------
+# [instance].reporter_id is locked by sigmond's wizard itself (it MUST
+# match the filename stem per MULTI-INSTANCE-ARCHITECTURE §5).  No
+# help.toml entry needed — the wizard renders it read-only by default.
+
+# --- Station ---------------------------------------------------------
+
+[station.station_id]
+title          = "PSWS station_id (should equal reporter_id)"
+help           = """The station identity embedded in dumphfdl's
+--station-id flag and reported to feed.airframes.io.
+
+By convention, hfdl-recorder's station_id MUST equal this instance's
+reporter_id (shown above as the locked `[instance].reporter_id`).
+If you really need to rename, do it via `smd instance rename` rather
+than editing this value alone — otherwise your uploaded data will
+appear under one identity while sigmond still tracks the instance
+under the other."""
+example        = "AC0G-B1"
+required       = true
+
+[station.grid_square]
+title          = "Maidenhead grid square (6-10 chars)"
+help           = """Your Maidenhead locator -- 6 characters minimum,
+up to 10 characters supported for fine-grained location reporting.
+
+Pre-filled from coordination.env STATION_GRID if available."""
+example        = "EM38ww"
+validator_hint = "2 letters + 2 digits + 2-8 alphanumeric chars"
+required       = true
+
+# --- Paths (all install-canonical; hidden from the operator wizard) --
+#
+# These values never vary in practice; surfacing them as editable
+# fields only confuses operators ("am I supposed to set this?") and
+# adds noise to the wizard.  They stay on disk for the rare emergency
+# override; edit them via `smd config edit hfdl-recorder` if needed.
+
+[paths.dumphfdl]
+hidden = true
+
+[paths.spool_dir]
+hidden = true
+
+[paths.log_dir]
+hidden = true
+
+[paths.systable]
+hidden = true
+
+# --- Sinks (operator opts in / out per uploader) ---------------------
+
+[sinks.local_json]
+title          = "Write decoded JSON locally?"
+help           = """Always-on local sink: one JSON-lines file per band
+under /var/lib/hfdl-recorder/, decoded HFDL frames in
+airframes-compatible schema.
+
+Turn OFF only when you're sure you don't want local storage (e.g.
+push-only to airframes.io with no local archive).  Most operators
+leave this ON — it's the canonical local audit trail."""
+required       = true
+
+[sinks.airframes_io]
+title          = "Upload to feed.airframes.io?"
+help           = """Push decoded HFDL frames to feed.airframes.io:5556
+over TCP, in the airframes.io feeder schema.
+
+Requires you to be a registered airframes.io feeder.  Turn OFF if
+you don't have an airframes.io account, want to feed only locally,
+or are testing without network egress."""
+required       = false
+
+# --- Radiod binding --------------------------------------------------
+
+[radiod.status]
+title          = "ka9q-radio mDNS status host"
+help           = """The mDNS hostname of the radiod instance this
+recorder consumes RTP from -- e.g. "bee1-status.local" when radiod
+runs on the local box, or "<other-host>-status.local" for a remote
+radiod.
+
+Always an mDNS .local name; NEVER an IP address (RTP discovery
+depends on mDNS).  Use `smd diag radiod` to list discovered hosts."""
+example        = "bee1-status.local"
+validator_hint = "must end with .local"
+required       = true
