@@ -263,9 +263,21 @@ class BandPipeline:
             logger.debug("%s: write to dumphfdl failed: %s", self._band.name, e)
 
     def _on_stream_dropped(self, *_args, **_kwargs) -> None:
+        # No teardown needed on a drop: dumphfdl tolerates an input gap (it
+        # just waits on stdin), and we hold no per-channel ring/closure to
+        # orphan.  Recovery is owned by dumphfdl + the supervisor; the slot
+        # resumes on restore.
         logger.warning("%s: ka9q-radio stream dropped", self._band.name)
 
     def _on_stream_restored(self, *_args, **_kwargs) -> None:
+        # Intentional no-op: channels are provisioned ONCE at startup and the
+        # SSRC is stable across a radiod restart (derived from freq/preset),
+        # so the existing MultiStream slot simply resumes — no re-subscribe.
+        # MAINTAINER NOTE: if a mid-flight reprovision path is ever added (a
+        # new SSRC per re-ensure_channel), it MUST prune the superseded slot
+        # — multi.prune_frequency(freq, keep_ssrc=...) — exactly as
+        # wspr-recorder/receiver_manager.py does, or the old slot leaks and
+        # the band can go silent on a changed SSRC.
         logger.info("%s: ka9q-radio stream restored", self._band.name)
 
 
