@@ -16,9 +16,9 @@ Investigation) sink for scientific use.
 
 It is one of the recorder clients in the HamSCI sigmond suite,
 following the same Pattern A install layout and deploy ergonomics as
-[psk-recorder](https://github.com/mijahauan/psk-recorder),
-[wspr-recorder](https://github.com/mijahauan/wspr-recorder), and
-[hf-timestd](https://github.com/mijahauan/hf-timestd).
+[psk-recorder](https://github.com/HamSCI/psk-recorder),
+[wspr-recorder](https://github.com/HamSCI/wspr-recorder), and
+[hf-timestd](https://github.com/HamSCI/hf-timestd).
 
 ## About the signal
 
@@ -174,7 +174,7 @@ decoded:json:tcp:…` sink.
 - [`config/hfdl-recorder-config.toml.template`](config/hfdl-recorder-config.toml.template)
   — the full config schema with inline comments.
 - The sigmond client contract is documented at
-  [`sigmond/docs/CLIENT-CONTRACT.md`](https://github.com/mijahauan/sigmond/blob/main/docs/CLIENT-CONTRACT.md)
+  [`sigmond/docs/CLIENT-CONTRACT.md`](https://github.com/HamSCI/sigmond/blob/main/docs/CLIENT-CONTRACT.md)
   in the orchestrator repo.
 
 ## License

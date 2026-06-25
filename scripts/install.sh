@@ -84,7 +84,7 @@ _ensure_uv || { ui_error "_ensure_uv failed"; exit 1; }
 if [[ ! -f /opt/git/sigmond/ka9q-python/pyproject.toml ]]; then
     ui_info "ka9q-python sibling repo not at /opt/git/sigmond/ka9q-python -- cloning"
     mkdir -p /opt/git/sigmond
-    git clone https://github.com/mijahauan/ka9q-python /opt/git/sigmond/ka9q-python \
+    git clone https://github.com/HamSCI/ka9q-python /opt/git/sigmond/ka9q-python \
         || { ui_error "Failed to clone ka9q-python"; exit 1; }
 fi
 

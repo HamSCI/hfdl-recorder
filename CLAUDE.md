@@ -27,7 +27,7 @@ Documentation layout:
 ## Authors
 
 - Michael Hauan (AC0G, GitHub: mijahauan)
-- Repo: https://github.com/mijahauan/hfdl-recorder
+- Repo: https://github.com/HamSCI/hfdl-recorder
 
 ## Quick Reference
 

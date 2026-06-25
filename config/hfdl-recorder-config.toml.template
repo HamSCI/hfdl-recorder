@@ -1,5 +1,5 @@
 # hfdl-recorder configuration
-# See https://github.com/mijahauan/hfdl-recorder for documentation.
+# See https://github.com/HamSCI/hfdl-recorder for documentation.
 
 [station]
 # dumphfdl --station-id; also identifies live feeds to aggregators.
