@@ -310,10 +310,12 @@ wizard). The ka9q-radio HFDL fragment must be loaded in radiod.
 
 ## 12. Risks & open questions
 
-- `HFD-F-090` `[NEW]` ⬜ **§18 timing authority read-but-not-consumed:**
-  `timing_authority_applied=null`, no `AuthorityReader` wired. Acceptable while
-  HFDL is ms-tolerant; SHALL be closed if any sub-frame timing/Doppler product
-  is ever claimed. *(candidate #18 Clients issue.)*
+- `HFD-F-090` `[NEW]` ✅ **§18 timing authority read-for-provenance, intentionally
+  NOT consumed to gate timing:** `timing_authority_applied=null`. dumphfdl owns
+  frame timing and no sub-frame timing product is claimed, so RTP-default timing is
+  sufficient and §18 gating is deliberately not wired. This is a recorded design
+  decision (sigmond #36), not an open gap; it would only need revisiting if a
+  sub-frame timing/Doppler product were ever claimed.
 - `HFD-F-091` `[NEW]` 🟡 **Contract-version doc drift:** CLAUDE.md prose states
   "client contract (v0.7)" while `contract.py` (`CONTRACT_VERSION="0.8"`) and
   `deploy.toml` (`contract_version="0.8"`) say 0.8, and the docstrings still

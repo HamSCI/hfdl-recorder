@@ -1,4 +1,4 @@
-"""Tests for contract v0.7 inventory/validate JSON builders."""
+"""Tests for contract v0.8 inventory/validate JSON builders."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from hfdl_recorder.contract import (
 FIXTURE = Path(__file__).parent / "fixtures" / "test-config.toml"
 
 
-def test_contract_version_is_0_7():
-    assert CONTRACT_VERSION == "0.7"
+def test_contract_version_is_0_8():
+    assert CONTRACT_VERSION == "0.8"
 
 
 def test_inventory_required_top_level_keys():

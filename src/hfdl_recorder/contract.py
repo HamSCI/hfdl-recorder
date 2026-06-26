@@ -1,4 +1,4 @@
-"""Client-contract v0.6 inventory and validate JSON builders."""
+"""Client-contract v0.8 inventory and validate JSON builders."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ CONTRACT_VERSION = "0.8"
 
 
 def build_inventory(config: dict, config_path: Path) -> dict:
-    """Build the inventory --json payload per contract v0.6."""
+    """Build the inventory --json payload per contract v0.8."""
     paths = config.get("paths", {})
     sinks = config.get("sinks", {})
     log_dir = paths.get("log_dir", "/var/log/hfdl-recorder")

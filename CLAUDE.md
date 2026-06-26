@@ -95,7 +95,7 @@ src/hfdl_recorder/
   cli.py              # CLI entry point, argparse, stdout-cleanliness guard
   config.py           # TOML loader, radiod block resolution, defaults
   configurator.py     # config init|edit subcommands
-  contract.py         # inventory/validate JSON builders (contract v0.7)
+  contract.py         # inventory/validate JSON builders (contract v0.8)
   bands.py            # static HFDL_BANDS table (12 entries)
   version.py          # GIT_INFO dict for provenance
   core/
@@ -151,11 +151,11 @@ deploy.toml           # Sigmond deploy manifest
   Independent of dumphfdl's own airframes.io TCP feed (which is
   dumphfdl-internal).
 
-## Client contract (v0.7)
+## Client contract (v0.8)
 
-hfdl-recorder implements the HamSCI client contract at version 0.7
+hfdl-recorder implements the HamSCI client contract at version 0.8
 (authoritative source: `/opt/git/sigmond/sigmond/docs/CLIENT-CONTRACT.md`).
-`src/hfdl_recorder/contract.py` carries `CONTRACT_VERSION = "0.7"`.
+`src/hfdl_recorder/contract.py` carries `CONTRACT_VERSION = "0.8"`.
 
 Sections implemented:
 
