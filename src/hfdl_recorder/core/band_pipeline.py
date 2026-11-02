@@ -60,6 +60,10 @@ class BandPipeline:
         self._multi = None
         self._first_sample_logged = False
         self._bytes_written = 0
+        # Optional squitter window keeper (timing/window_keeper.py).  Fed
+        # after the dumphfdl write; it never blocks and never raises here.
+        self._keeper = None
+        self._keeper_failed = False
 
     @property
     def name(self) -> str:
@@ -68,6 +72,10 @@ class BandPipeline:
     @property
     def band(self) -> HfdlBand:
         return self._band
+
+    def set_keeper(self, keeper) -> None:
+        """Hand each block, after dumphfdl's copy, to a window keeper."""
+        self._keeper = keeper
 
     def attach(self, multi, lifetime: int | None = None) -> int:
         """Register our band as a channel in the shared MultiStream.
@@ -249,6 +257,22 @@ class BandPipeline:
                 logger.warning("%s: first-sample debug failed: %s", self._band.name, e)
             self._first_sample_logged = True
 
+        self._write_dumphfdl(samples)
+
+        keeper = self._keeper
+        if keeper is not None:
+            rtp = getattr(quality, "delivered_rtp_start", None)
+            if rtp is not None:
+                try:
+                    keeper.feed(samples, rtp)
+                except Exception:  # noqa: BLE001 - decoding must not notice
+                    if not self._keeper_failed:
+                        self._keeper_failed = True
+                        logger.exception(
+                            "%s: window keeper failed; dumphfdl unaffected "
+                            "(further failures silent)", self._band.name)
+
+    def _write_dumphfdl(self, samples) -> None:
         with self._proc_lock:
             proc = self._proc
             if proc is None or proc.poll() is not None or proc.stdin is None:

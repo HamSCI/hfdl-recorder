@@ -134,3 +134,80 @@ def test_f32_iq_to_cf32_zeros_nan_and_inf():
     assert out[3] == np.float32(0.0)   # was +inf
     assert out[4] == np.float32(0.0)   # was -inf
     assert out[5] == np.float32(0.5)   # finite
+
+
+# -- window keeper beside the dumphfdl write (Task 5) --
+
+import io
+from types import SimpleNamespace
+
+
+class _FakeProc:
+    def __init__(self):
+        self.stdin = io.BytesIO()
+
+    def poll(self):
+        return None
+
+
+class _RecordingKeeper:
+    def __init__(self, fail=False):
+        self.calls = []
+        self.fail = fail
+
+    def feed(self, samples, rtp_start):
+        self.calls.append((np.array(samples, copy=True), rtp_start))
+        if self.fail:
+            raise RuntimeError("keeper broke")
+
+
+def _drive(keeper) -> bytes:
+    pipeline = BandPipeline(band=HFDL_BANDS["HFDL13"], radiod_id="rx888",
+                            config=_make_config())
+    pipeline._first_sample_logged = True
+    pipeline._proc = _FakeProc()
+    if keeper is not None:
+        pipeline.set_keeper(keeper)
+    rng = np.random.default_rng(1)
+    rtp = 4_294_967_000          # wraps during the run
+    for _ in range(50):
+        x = (rng.standard_normal(2000) + 1j * rng.standard_normal(2000)).astype(np.complex64)
+        x[7] = complex(np.nan, 1.0)
+        pipeline._on_samples(x, SimpleNamespace(delivered_rtp_start=rtp))
+        rtp = (rtp + 2000) & 0xFFFFFFFF
+    return pipeline._proc.stdin.getvalue()
+
+
+def test_dumphfdl_bytes_unchanged_with_keeper(tmp_path):
+    from hfdl_recorder.timing.window_keeper import WindowKeeper
+
+    off = _drive(None)
+    rec = _RecordingKeeper()
+    assert _drive(rec) == off
+    assert _drive(_RecordingKeeper(fail=True)) == off
+    real = WindowKeeper(band=HFDL_BANDS["HFDL13"], fs=100_000, out_dir=tmp_path,
+                        ground_stations=["Riverhead, New York"],
+                        anchor_fn=lambda rtp: None, counter_map_fn=lambda: None)
+    real.start()
+    try:
+        assert _drive(real) == off
+    finally:
+        real.stop()
+    # The keeper saw every block, with its RTP, after dumphfdl's copy.
+    assert len(rec.calls) == 50
+    assert rec.calls[0][1] == 4_294_967_000
+    assert rec.calls[1][1] == (4_294_967_000 + 2000) & 0xFFFFFFFF
+
+
+def test_keeper_skips_block_without_rtp():
+    rec = _RecordingKeeper()
+    pipeline = BandPipeline(band=HFDL_BANDS["HFDL13"], radiod_id="rx888",
+                            config=_make_config())
+    pipeline._first_sample_logged = True
+    pipeline._proc = _FakeProc()
+    pipeline.set_keeper(rec)
+    x = np.zeros(10, dtype=np.complex64)
+    pipeline._on_samples(x, SimpleNamespace(delivered_rtp_start=None))
+    pipeline._on_samples(x, None)
+    assert rec.calls == []
+    assert len(pipeline._proc.stdin.getvalue()) == 2 * 10 * 8

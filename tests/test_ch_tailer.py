@@ -279,5 +279,43 @@ class TestChTailer(unittest.TestCase):
                              "garbage and non-HFDL lines should be silently skipped")
 
 
+
+class TestOnSquitter(unittest.TestCase):
+
+    def _tailer(self, on_squitter, writer=None):
+        fake = writer or FakeWriter()
+        return ChTailer(json_path=Path("/nonexistent/HFDL21.json"),
+                        band_name="HFDL21", radiod_id="test-rx888",
+                        writer_factory=lambda batch_rows: fake,
+                        on_squitter=on_squitter), fake
+
+    def test_spdu_frames_reach_on_squitter(self):
+        got = []
+        tailer, fake = self._tailer(got.append)
+        tailer._writer = fake
+        tailer._consume(LINE_SPDU + "\n" + LINE_LPDU_ACARS + "\n")
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["hfdl"]["spdu"]["src"]["id"], 11)
+        self.assertEqual(len(fake.inserts), 2)     # rows unchanged
+
+    def test_on_squitter_error_does_not_stop_rows(self):
+        def boom(frame):
+            raise RuntimeError("x")
+        tailer, fake = self._tailer(boom)
+        tailer._writer = fake
+        tailer._consume(LINE_SPDU + "\n")
+        self.assertEqual(len(fake.inserts), 1)
+
+    def test_squitters_flow_without_a_sink_writer(self):
+        got = []
+        def broken_factory(batch_rows):
+            raise RuntimeError("no sigmond")
+        tailer = ChTailer(json_path=Path("/nonexistent/HFDL21.json"),
+                          band_name="HFDL21", radiod_id="test-rx888",
+                          writer_factory=broken_factory, on_squitter=got.append)
+        tailer._consume(LINE_SPDU + "\n")
+        self.assertEqual(len(got), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

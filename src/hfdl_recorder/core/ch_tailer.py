@@ -25,7 +25,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +271,7 @@ class ChTailer:
         batch_rows: int = 200,
         writer_factory=None,
         reporter_id: Optional[str] = None,
+        on_squitter: Optional[Callable[[dict], None]] = None,
     ) -> None:
         self._json_path = Path(json_path)
         self._band_name = band_name
@@ -284,6 +285,9 @@ class ChTailer:
         self._batch_rows = batch_rows
         self._writer_factory = writer_factory or _default_writer_factory
         self._writer = None
+        # Optional: called with each parsed frame that carries an SPDU
+        # (the squitter window keeper learns ground stations from these).
+        self._on_squitter = on_squitter
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._last_pos = 0
@@ -295,9 +299,13 @@ class ChTailer:
         try:
             self._writer = self._writer_factory(self._batch_rows)
         except Exception as e:
-            logger.warning("ch_tailer disabled (band=%s): %s", self._band_name, e)
-            return
-        if self._writer.is_noop:
+            if self._on_squitter is None:
+                logger.warning("ch_tailer disabled (band=%s): %s", self._band_name, e)
+                return
+            logger.warning("ch_tailer band=%s: no spot rows (%s); still "
+                           "reading squitters", self._band_name, e)
+            self._writer = None
+        if self._writer is not None and self._writer.is_noop:
             logger.debug("ch_tailer band=%s: sink writer is a no-op "
                          "(sink path unwritable)", self._band_name)
         if self._json_path.exists():
@@ -342,7 +350,7 @@ class ChTailer:
                              self._band_name)
 
     def _poll_once(self) -> None:
-        if self._writer is None:
+        if self._writer is None and self._on_squitter is None:
             return
         try:
             stat = self._json_path.stat()
@@ -364,7 +372,8 @@ class ChTailer:
                 return
             self._consume(chunk.decode(errors="replace"))
 
-        if (time.monotonic() - self._last_flush) > self.FLUSH_INTERVAL_SEC:
+        if self._writer is not None and \
+                (time.monotonic() - self._last_flush) > self.FLUSH_INTERVAL_SEC:
             try:
                 self._writer.flush()
             except Exception as e:
@@ -383,6 +392,8 @@ class ChTailer:
         self._partial = lines[-1]              # partial trailing fragment
         rows: list[dict] = []
         for line in lines[:-1]:
+            if self._on_squitter is not None and '"spdu"' in line:
+                self._squitter(line)
             row = parse_hfdl_frame(line, band_name=self._band_name)
             if row is None:
                 continue
@@ -393,12 +404,23 @@ class ChTailer:
             row["reporter_id"] = self._reporter_id
             row["processing_version"] = self._processing_version
             rows.append(row)
-        if rows:
+        if rows and self._writer is not None:
             try:
                 self._writer.insert(rows)
             except Exception as e:
                 logger.warning("ch_tailer band=%s: insert failed (%d rows): %s",
                                self._band_name, len(rows), e)
+
+
+    def _squitter(self, line: str) -> None:
+        try:
+            obj = json.loads(line)
+            hfdl = obj.get("hfdl") if isinstance(obj, dict) else None
+            if isinstance(hfdl, dict) and isinstance(hfdl.get("spdu"), dict):
+                self._on_squitter(obj)
+        except Exception:  # noqa: BLE001 - rows must keep flowing
+            logger.debug("ch_tailer band=%s: on_squitter failed",
+                         self._band_name, exc_info=True)
 
 
 def _default_writer_factory(batch_rows: int):
