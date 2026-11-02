@@ -53,6 +53,15 @@ def test_synth_burst_lands_where_asked():
     assert abs(onset / fs - 0.0423) < 1 / fs
 
 
+def test_synth_onset_tight_at_high_rate():
+    # 18 kS/s: a half-symbol convention error would move onset by ~5 samples.
+    fs = 18000
+    x = w.synth_squitter(fs, 0.0123, snr_db=40, rng=np.random.default_rng(1))
+    env = np.abs(x)
+    onset = np.argmax(env > 0.5 * np.median(env[len(env) // 2:]))
+    assert abs(onset / fs - 0.0423) < 1 / fs
+
+
 def test_fractional_delay_is_exact():
     fs = 6000
     rng = np.random.default_rng
