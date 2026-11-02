@@ -6,6 +6,7 @@ Subcommands:
     version     — version + git block
     daemon      — long-running supervisor of per-band dumphfdl subprocesses
     status      — health check
+    label-check — compare HFDL UTC labels with hf-timestd's
 """
 
 from __future__ import annotations
@@ -46,32 +47,7 @@ def _install_sighup_handler() -> None:
         signal.signal(signal.SIGHUP, _on_sighup)
 
 
-def main():
-    _contract_quiet = any(
-        arg in ("inventory", "validate", "version")
-        for arg in sys.argv[1:3]
-    )
-
-    root = logging.getLogger()
-    if _contract_quiet:
-        root.setLevel(logging.WARNING)
-    else:
-        root.setLevel(_resolve_log_level())
-
-    if not root.handlers:
-        handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(
-            logging.Formatter("%(levelname)s:%(name)s:%(message)s")
-        )
-        root.addHandler(handler)
-    else:
-        for handler in root.handlers:
-            if _contract_quiet:
-                handler.setLevel(logging.WARNING)
-
-    if not _contract_quiet:
-        logging.info("hfdl-recorder starting")
-
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hfdl-recorder",
         description="HFDL recorder for ka9q-radio (one dumphfdl per band)",
@@ -157,6 +133,59 @@ def main():
                            help="JSON payload path or `-` for stdin (default)")
     _add_common(sub_apply)
 
+    sub_lc = subparsers.add_parser(
+        "label-check",
+        help="compare an HFDL channel's UTC label with hf-timestd's",
+    )
+    sub_lc.add_argument("--radiod-id", default=None,
+                        help="ID of the [[radiod]] block to use")
+    sub_lc.add_argument("--ref-freq-hz", type=float, required=True,
+                        help="frequency of the hf-timestd reference channel")
+    sub_lc.add_argument("--ref-ssrc", type=int, default=None,
+                        help="pick the reference channel by SSRC if several "
+                             "iq channels share the frequency")
+    sub_lc.add_argument("--band", required=True,
+                        help="HFDL band whose sample rate the probe uses")
+    sub_lc.add_argument("--seconds", type=float, default=30.0)
+    sub_lc.add_argument("--repeats", type=int, default=5)
+    sub_lc.add_argument("--json", action="store_true",
+                        help="print one JSON object per repeat")
+    sub_lc.add_argument("--out", type=Path,
+                        default=Path("/var/lib/hfdl-recorder/label_corrections.toml"),
+                        help="write per-band median lag here")
+    _add_common(sub_lc)
+
+    return parser
+
+
+def main():
+    _contract_quiet = any(
+        arg in ("inventory", "validate", "version")
+        for arg in sys.argv[1:3]
+    )
+
+    root = logging.getLogger()
+    if _contract_quiet:
+        root.setLevel(logging.WARNING)
+    else:
+        root.setLevel(_resolve_log_level())
+
+    if not root.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(
+            logging.Formatter("%(levelname)s:%(name)s:%(message)s")
+        )
+        root.addHandler(handler)
+    else:
+        for handler in root.handlers:
+            if _contract_quiet:
+                handler.setLevel(logging.WARNING)
+
+    if not _contract_quiet:
+        logging.info("hfdl-recorder starting")
+
+    parser = build_parser()
+
     args = parser.parse_args()
 
     if args.log_level and not _contract_quiet:
@@ -176,6 +205,9 @@ def main():
         _handle_status(args)
     elif args.command == "config":
         _handle_config(args)
+    elif args.command == "label-check":
+        from hfdl_recorder.timing.label_check import run_label_check
+        sys.exit(run_label_check(args))
     else:
         parser.print_help()
         sys.exit(1)
