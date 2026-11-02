@@ -105,38 +105,70 @@ def modulate(symbols: np.ndarray, fs: float, rolloff: float = 0.35) -> np.ndarra
 
 
 def _burst_symbols(m1_shift: int, rng) -> np.ndarray:
-    """Pre-key, A, A, M1, M2, nine T blocks, random BPSK data to slot end.
+    """A, A, M1, M2, nine T blocks, then random BPSK data to slot end.
 
-    The nine T blocks sit back to back after M2.  Real frames interleave
-    training with data; that detail does not affect the first 702 symbols.
+    The pre-key is left out; ``synth_squitter`` renders it separately, with
+    its own length and phase.  The nine T blocks sit back to back after M2.
+    Real frames interleave training with data; that detail does not affect
+    the A pair, M1 or M2.
     """
     m1 = m1_symbols(m1_shift)
-    parts = [timing_template(), m1, m1[:M2_LEN], np.tile(_bpsk(_T_BITS), 9)]
+    a = a_symbols()
+    parts = [a, a, m1, m1[:M2_LEN], np.tile(_bpsk(_T_BITS), 9)]
     head = np.concatenate(parts)
-    total = int(round(SLOT_S * SYMBOL_RATE))
+    total = int(round(SLOT_S * SYMBOL_RATE)) - PREKEY_LEN
     data = rng.choice([-1.0, 1.0], size=max(total - len(head), 0))
     return np.concatenate([head, data])
 
 
+# Real ground stations key a shorter pre-key than ARINC 635's 448 symbols:
+# Riverhead (8912 kHz, received at AC0G-ND, 2026-11-02) starts its tone
+# about 230.5 ms (~415 symbols) before A1, at a phase that varies from
+# burst to burst.
+REAL_PREKEY_LEN = 415
+
+
 def synth_squitter(fs: float, delay_s: float, *, snr_db: float,
                    doppler_hz: float = 0.0, paths=(), m1_shift: int = 0,
+                   prekey_len: int = REAL_PREKEY_LEN, prekey_phase=None,
                    rng) -> np.ndarray:
     """A test window holding one squitter.
 
-    The window lasts 0.03 + 32/13 s.  The burst starts at 0.03 + delay_s.
+    The window lasts 0.03 + 32/13 s.  ``delay_s`` places the nominal burst
+    start, A1 - 448 symbols, at 0.03 + delay_s; A1 therefore starts at
+    0.03 + delay_s + 448/1800 whatever the pre-key's length.  The pre-key
+    tone runs for the ``prekey_len`` symbols before A1, rotated by
+    ``prekey_phase`` radians (drawn uniformly from ``rng`` when None).
+    With prekey_len = PREKEY_LEN and prekey_phase = 0 the burst is the
+    ARINC 635 one, starting at 0.03 + delay_s.
+
     ``paths`` is empty (one path, amplitude 1) or a list of
     (extra_delay_s, amplitude) pairs, each relative to delay_s, that replace
     the default path.  Complex white noise is added at ``snr_db`` relative to
     the mean power of the direct burst.  ``doppler_hz`` rotates the burst.
     """
     n = int(round((_LEAD_S + SLOT_S) * fs))
+    if prekey_phase is None:
+        prekey_phase = rng.uniform(0.0, 2.0 * np.pi)
     syms = _burst_symbols(m1_shift, rng)
+    prekey = np.ones(prekey_len)
+    rot = np.exp(1j * prekey_phase)
     rolloff = 0.35
+    a1_s = _LEAD_S + delay_s + PREKEY_LEN / SYMBOL_RATE
+
+    def burst(extra: float) -> np.ndarray:
+        t_a1 = a1_s + extra
+        out = _render(syms, fs, n, t_a1, rolloff)
+        if prekey_len > 0:
+            out = out + rot * _render(prekey, fs, n, t_a1 - prekey_len / SYMBOL_RATE,
+                                      rolloff)
+        return out
+
     x = np.zeros(n, dtype=complex)
     for extra, amp in (paths or [(0.0, 1.0)]):
-        x += amp * _render(syms, fs, n, _LEAD_S + delay_s + extra, rolloff)
+        x += amp * burst(extra)
     x *= np.exp(2j * np.pi * doppler_hz * np.arange(n) / fs)
-    direct = _render(syms, fs, n, _LEAD_S + delay_s, rolloff)
+    direct = burst(0.0)
     live = np.abs(direct) > 0
     power = np.mean(np.abs(direct[live]) ** 2) if live.any() else 1.0
     sigma = np.sqrt(power / 10 ** (snr_db / 10) / 2)

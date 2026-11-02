@@ -67,7 +67,7 @@ _GPS_LEAP_S = 18                 # GPS minus UTC
 
 _NAN_FIELDS = ("arrival_utc", "delay_s", "snr_db", "peak_width_s",
                "second_peak_ratio", "second_peak_delay_s", "doppler_hz",
-               "lobe_distortion", "prekey_edge_offset_s")
+               "lobe_distortion", "prekey_lead_s", "a1_utc")
 
 
 def _clean(v):

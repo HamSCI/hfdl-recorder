@@ -2,60 +2,61 @@
 
 Input: a window of complex baseband IQ at rate fs (the channel's dial
 frequency at 0 Hz, the burst on the +1440 Hz subcarrier) whose first sample
-carries the UTC label t0_utc.  Output: when the burst started, in the
-convention of ``waveform`` (the 50 % point of the pre-key's leading edge),
-and that time minus the slot's nominal start.
+carries the UTC label t0_utc.
+
+Output convention.  The analyzer measures A1, the start of the first A
+sequence (the 50 % point of its first pulse, per ``waveform``), and
+reports it as ``a1_utc``.  ``arrival_utc`` is A1 less 448 symbols
+(248.9 ms): the burst start ARINC 635 implies, and the spec's definition,
+so delays stay comparable across stations.  Real pre-keys need not be 448
+symbols long; Riverhead's tone starts ~230.5 ms before A1.  Nothing in the
+timing depends on the pre-key, and ``prekey_lead_s`` records where the
+tone actually started.
 
 The method, in order:
 
-1. Coarse search.  Correlate the window against the A pair (141 ms) under a
-   few Doppler hypotheses 2 Hz apart.  The A pair alone tolerates a 1 Hz
-   residual, and its strongest match locates the pre-key.
-2. Doppler.  The pre-key holds a constant tone at 1440 Hz plus the Doppler
-   for 249 ms.  An FFT of 240 ms of it, Hann-windowed, zero-padded and
-   interpolated by parabola, measures the Doppler; the window is then
-   rotated back by it.
-3. Detection.  Correlate against the whole timing template (pre-key, A, A).
-   Its peak over its median gives ``snr_db``, and a second peak more than
-   50 ms away at 0.8 of the first makes the window ambiguous.
-4. M1.  The eight M1 rotations are tried at the symbols after the A pair.
-   The winner labels the squitter and extends the fine template.
-5. Fine timing.  Correlate against pre-key, A, A, M1, M2 (M1 and M2 only
-   when M1 is clear), interpolated 32 times by zero-padding the
-   cross-spectrum, which is exact for a band-limited correlation; a
-   parabola on the magnitude gives the arrival.  The 249 ms tone gives this
-   correlation a broad triangular pedestal, but it varies little across
-   the few samples the parabola sees.
-6. Width and multipath.  The A pair's correlation has no pedestal, so it
-   gives the main-lobe width and the strongest other path within 50 ms,
-   beyond the A pair's first sidelobe (0.19 of the peak, out to 2.3 symbols).
-   A path there at 0.8 of the main one or more makes the window ambiguous:
-   which mode is "the" arrival becomes a coin toss.
-7. Quality flags, which never move or refuse the answer:
-   ``unresolved_multipath`` when the A pair's main lobe departs from the
-   clean template's by more than noise explains, and
-   ``prekey_edge_mismatch`` when the pre-key's own leading edge, fitted
-   from the tone without the A pair or PREKEY_LEN, sits more than 300 us
-   (or 5 sd of its own scatter) from the A-derived start, or cannot be
-   found under a strong plateau.
+1. Coarse search.  Correlate against the A pair (141 ms) under Doppler
+   hypotheses 2 Hz apart over +/- 20 Hz; the strongest match locates A1.
+2. Doppler.  An FFT of the pre-key tone from A1 - 225 ms to A1 - 5 ms,
+   Hann-windowed, zero-padded and interpolated by parabola.  Magnitude
+   only, so the tone's phase does not matter.  Without a tone there (more
+   than 1.5 Hz from the coarse hypothesis, or too little window), the
+   coarse hypothesis stands.
+3. Detection, on the A pair's correlation after Doppler removal.  Its peak
+   over its median gives ``snr_db``.  A second peak more than 50 ms away at
+   0.8 of the first makes the window ambiguous, skipping +/- 3 ms around
+   +/- 70.6 ms, where one A of the template meets the other A of the burst
+   at 0.5 by construction.  (The pre-key carries 64 % of the full
+   template's energy; a full-template correlation is a broad triangle
+   whose shoulder at 50 ms reaches 0.74-0.87 on real bursts, which is why
+   detection no longer uses it.)
+4. M1.  The eight rotations are tried after the A pair; a clear winner
+   labels the squitter and extends the fine template.
+5. Fine timing.  Correlate against A, A, M1, M2 (A, A when M1 is unclear),
+   interpolated 32 times by zero-padding the cross-spectrum (exact for a
+   band-limited correlation); a parabola on the magnitude gives A1.
+6. Width and multipath, from the A pair's upsampled correlation: main-lobe
+   width and the strongest other path within 50 ms, beyond the A pair's
+   first sidelobe (0.19 of the peak, out to 2.3 symbols).  A path there at
+   0.8 of the main one or more makes the window ambiguous: which mode is
+   "the" arrival becomes a coin toss.
+7. Quality, never moving or refusing the answer: ``unresolved_multipath``
+   when the A pair's main lobe departs from the clean template's by more
+   than noise explains; ``prekey_lead_s`` = A1 minus the tone's fitted
+   start (NaN when the tone is too weak, or the window starts inside it).
 
 Limits, measured on synth_squitter:
 
 - An echo closer than about 1.3 ms (2.4 kHz of bandwidth cannot resolve
   it) merges with the main lobe and pulls the answer, roughly in
-  proportion to its amplitude, by up to ~0.4x the echo spacing at 0.6
-  relative amplitude: -116 us for 0.6 at 0.3 ms,
-  +113 us for 0.6 at 0.6 ms, +26 us for 0.6 at 1.0 ms, -18 us for 0.6 at
-  1.3 ms.  ``unresolved_multipath`` catches these; at high SNR the largest
-  unflagged pull seen was -21 us (0.1 at 0.3 ms), and the flag's threshold
-  rises with noise.
-- A burst whose fine template (pre-key edge to M2) does not lie wholly in
-  the window comes back ``truncated``, never timed.
-- The coarse search covers +/- 20 Hz of carrier offset.
+  proportion to its amplitude.  The flag catches the large pulls; see the
+  task report for the measured table.
+- A burst whose fine template (A1 to M2) does not lie wholly in the window
+  comes back ``truncated``, never timed.
 
 Every not-found result carries NaN in the timing and quality fields; only
-``snr_db`` survives once it has been measured.  Reasons: ok, no_peak,
-ambiguous, truncated, bad_input (non-finite samples), too_short.
+``snr_db`` survives once measured.  Reasons: ok, no_peak, ambiguous,
+truncated, bad_input (non-finite samples), too_short.
 
 Everything correlates on magnitude, so a polarity-inverted preamble times
 the same as an upright one.
@@ -82,10 +83,9 @@ from .waveform import (
     timing_template,
 )
 
-# snr_db = peak / median of the whole-template correlation.  Pure noise
-# scores 10.3-14.7 dB (300 trials, median 11.2), so the brief's 10 dB would
-# call noise found.  A burst at -16 dB input SNR (per 6 kHz) still scores
-# 16-19 dB, and its timing error there runs 47 us rms.
+# snr_db = peak / median of the A pair's correlation.  Pure noise scores
+# 12.8 dB median, 14.5 dB worst (200 trials), so 17 dB keeps a margin.  The two
+# weak Riverhead windows dumphfdl could not decode score 15.8 and 16.2.
 FOUND_SNR_DB = 17.0
 AMBIGUOUS_RATIO = 0.8       # a far peak at this fraction of the first
 AMBIGUOUS_SEP_S = 0.050     # ... more than this far away
@@ -93,32 +93,39 @@ MULTIPATH_SPAN_S = 0.050    # other paths are looked for within this span
 M1_CLEAR_RATIO = 2.0        # best M1 shift must beat the next by this
 LOBE_DISTORTION_FLAG = 0.015    # flag floor for A-pair main-lobe distortion
 LOBE_NOISE_FACTOR = 1.5         # ... raised to this x the correlation's relative noise
-PREKEY_EDGE_FLAG_S = 300e-6     # pre-key edge vs A-derived start
-# The edge is checked only when the pre-key plateau's per-sample SNR
-# (linear) reaches this, about 8 dB input SNR.  The fitted edge scatters
-# with sd ~ EDGE_SD_K / sqrt(edge fit SNR): 81 us at 8 dB, 62 at 10, 49 at
-# 12 (200 trials each), so the flag fires beyond 300 us or 5 sd, whichever
-# is larger.
+# The pre-key's start is measured only when its plateau (180 ms) carries
+# this integrated SNR (linear); the step fit refines the CUSUM's edge only
+# when its own per-sample SNR reaches EDGE_MIN_SNR (about 8 dB input).
+PLATEAU_MIN_SNR = 100.0
 EDGE_MIN_SNR = 6.0
-EDGE_SD_K = 210e-6
 
 _ROLLOFF = 0.35
 _PAD = 8                    # silent symbols each side of a rendered template
 _UPSAMPLE = 32              # interpolation factor for fine timing
 _DOPPLER_STEP_HZ = 2.0
 _DOPPLER_SPAN_HZ = 20.0     # coarse search covers +/- this
-_PREKEY_GUARD_S = 0.005     # skip this much at each end of the pre-key
-_PREKEY_FFT_S = 0.240
+_DOPPLER_AGREE_HZ = 1.5     # pre-key FFT must land this close to the coarse hit
+_PREKEY_FFT_FROM_S = 0.225  # Doppler FFT runs from A1 - this ...
+_PREKEY_FFT_TO_S = 0.005    # ... to A1 - this
+_PREKEY_FFT_MIN_S = 0.050   # shortest usable FFT segment
 _TONE_SEARCH_HZ = 30.0      # look for the pre-key tone this far from 1440 Hz
-_MAIN_SEARCH_S = 0.005      # fine peak sought this close to the coarse hit
+_MAIN_SEARCH_S = 0.002      # fine peak sought this close to the coarse hit
 _LOBE_EXCLUDE_SYM = 2.3     # the A pair's first sidelobe (0.19) ends here
-_EDGE_PRE_SYM = 6           # pre-key edge sought this far before the A-derived start
-_EDGE_POST_SYM = 4          # ... and this far after it
-_EDGE_MISSING_RATIO = 0.25  # edge fit this far below the plateau's SNR: no edge there
+_SINGLE_A_S = A_LEN / SYMBOL_RATE   # one A against the other: 0.5 by construction
+_SINGLE_A_SKIP_S = 0.003    # ... skipped this far either side in the far test
+_LEAD_SEARCH_S = 0.320      # pre-key start sought no earlier than A1 - this
+_EDGE_PRE_SYM = 6           # edge refinement window, symbols before ...
+_EDGE_POST_SYM = 4          # ... and after the coarse edge
 
 
 @dataclass
 class Arrival:
+    """One squitter's timing.  Not-found results carry NaN timing fields.
+
+    ``arrival_utc`` is A1 - 448 symbols (the ARINC 635 burst start, the
+    spec's convention); ``a1_utc`` is A1 itself, so nothing downstream need
+    depend on the 448.  ``delay_s`` = arrival_utc - nominal slot start.
+    """
     found: bool
     arrival_utc: float
     delay_s: float
@@ -130,8 +137,9 @@ class Arrival:
     m1_shift: int | None
     reason: str
     lobe_distortion: float          # RMS main-lobe departure from the clean template
-    prekey_edge_offset_s: float     # fitted pre-key edge minus A-derived start; NaN unchecked
+    prekey_lead_s: float            # A1 minus the pre-key tone's start; NaN unobservable
     flags: str                      # comma-separated quality flags, "" when clean
+    a1_utc: float                   # start of A1 (UTC); arrival_utc + 448 symbols
 
 
 def _render(symbols: np.ndarray, fs: float) -> np.ndarray:
@@ -176,13 +184,16 @@ def _parabola(y: np.ndarray, i: int) -> float:
     return 0.0 if den == 0 else 0.5 * (a - c) / den
 
 
-def _doppler_from_prekey(x: np.ndarray, fs: float, start: int) -> float:
-    """Carrier offset of the pre-key tone that starts at sample ``start``."""
-    lo = max(start + int(round(_PREKEY_GUARD_S * fs)), 0)
-    hi = min(lo + int(round(_PREKEY_FFT_S * fs)), len(x))
+def _doppler_from_prekey(x: np.ndarray, fs: float, lo: int, hi: int) -> float:
+    """Carrier offset of the pre-key tone in x[lo:hi]; NaN when too short.
+
+    Phase-blind: an FFT magnitude peak, so the tone's phase against the A
+    pair (which varies burst to burst) does not matter.
+    """
+    lo, hi = max(lo, 0), min(hi, len(x))
     seg = x[lo:hi]
-    if len(seg) < 16:
-        return 0.0
+    if len(seg) < int(_PREKEY_FFT_MIN_S * fs):
+        return float("nan")
     nfft = 1 << 18
     spec = np.abs(np.fft.fft(seg * np.hanning(len(seg)), nfft))
     freqs = np.fft.fftfreq(nfft, 1.0 / fs)
@@ -269,13 +280,12 @@ def _step(t_sym: np.ndarray) -> np.ndarray:
 
 
 def _prekey_edge(xd: np.ndarray, fs: float, start: float) -> tuple[float, float]:
-    """The pre-key's leading edge, in samples, found from the tone alone.
+    """Refine the pre-key's leading edge near ``start``, in samples.
 
     Mix the 1440 Hz subcarrier to 0 Hz, then fit a * step(t - e) by least
     squares over a few symbols around ``start`` (a complex and free, e on a
-    grid refined by parabola).  This uses neither the A pair nor
-    PREKEY_LEN, so it checks the zero the template sets.  Returns (edge,
-    per-sample SNR of the fit); NaNs when the fit window leaves the signal.
+    grid refined by parabola).  Returns (edge, per-sample SNR of the fit);
+    NaNs when the fit window leaves the signal.
     """
     sym = fs / SYMBOL_RATE
     lo = int(np.floor(start - (_EDGE_PRE_SYM + 2) * sym))
@@ -297,19 +307,6 @@ def _prekey_edge(xd: np.ndarray, fs: float, start: float) -> tuple[float, float]
     return e, float(abs(a) ** 2 / resid) if resid > 0 else float("inf")
 
 
-def _prekey_plateau_snr(xd: np.ndarray, fs: float, start: float) -> float:
-    """Per-sample SNR of the pre-key tone, 60-200 ms after ``start``."""
-    lo = int(round(start + 0.060 * fs))
-    hi = int(round(start + 0.200 * fs))
-    if lo < 0 or hi > len(xd):
-        return float("nan")
-    n = np.arange(lo, hi)
-    z = xd[lo:hi] * np.exp(-2j * np.pi * SUBCARRIER_HZ * n / fs)
-    a = np.mean(z)
-    resid = np.mean(np.abs(z - a) ** 2)
-    return float(abs(a) ** 2 / resid) if resid > 0 else float("inf")
-
-
 def _noise_sigma(x: np.ndarray, fs: float) -> float:
     """Per-sample noise RMS, from the negative-frequency half of the window.
 
@@ -324,13 +321,48 @@ def _noise_sigma(x: np.ndarray, fs: float) -> float:
     return float(np.sqrt(np.median(spec[band]) / np.log(2) / len(x)))
 
 
+def _prekey_start(xd: np.ndarray, fs: float, a1: float, first: int) -> float:
+    """Where the pre-key tone switches on, in xd samples; NaN if unobservable.
+
+    The tone's phase is taken from its own plateau, 200-20 ms before A1, so
+    it need not match the A pair's.  A CUSUM on the projection onto that
+    phase (levels 0 and |plateau|) finds the step between ``first`` (the
+    window's first sample) or A1 - 320 ms and A1 - 100 ms; the step fit of
+    ``_prekey_edge`` then refines it.  Unobservable when the plateau is too
+    weak, or the tone already runs at the search's start.
+    """
+    p_lo, p_hi = int(round(a1 - 0.200 * fs)), int(round(a1 - 0.020 * fs))
+    lo = max(first, int(round(a1 - _LEAD_SEARCH_S * fs)))
+    hi = int(round(a1 - 0.100 * fs))
+    if p_lo < first or hi - lo < 16:
+        return float("nan")
+    n = np.arange(len(xd))
+    z = xd * np.exp(-2j * np.pi * SUBCARRIER_HZ * n / fs)
+    c = np.mean(z[p_lo:p_hi])
+    resid = np.mean(np.abs(z[p_lo:p_hi] - c) ** 2)
+    if not (resid > 0 and abs(c) ** 2 / resid * (p_hi - p_lo) >= PLATEAU_MIN_SNR):
+        return float("nan")
+    r = np.real(z[lo:hi] * np.conj(c)) / abs(c) - 0.5 * abs(c)
+    tail = np.cumsum(r[::-1])[::-1]                 # sum from each e to hi
+    k = int(np.argmax(tail))
+    if k == 0:
+        return float("nan")                         # tone on before the search
+    coarse = float(lo + k)
+    edge, edge_snr = _prekey_edge(xd, fs, coarse)
+    sym = fs / SYMBOL_RATE
+    if (edge_snr >= EDGE_MIN_SNR
+            and -_EDGE_PRE_SYM + 0.5 < (edge - coarse) / sym < _EDGE_POST_SYM - 0.5):
+        return edge
+    return coarse
+
+
 def _not_found(reason: str, snr_db: float = float("nan")) -> Arrival:
     nan = float("nan")
     return Arrival(found=False, arrival_utc=nan, delay_s=nan, snr_db=snr_db,
                    peak_width_s=nan, second_peak_ratio=nan,
                    second_peak_delay_s=nan, doppler_hz=nan, m1_shift=None,
-                   reason=reason, lobe_distortion=nan,
-                   prekey_edge_offset_s=nan, flags="")
+                   reason=reason, lobe_distortion=nan, prekey_lead_s=nan,
+                   flags="", a1_utc=nan)
 
 
 def time_squitter(x: np.ndarray, fs: float, t0_utc: float, nominal_utc: float,
@@ -343,7 +375,7 @@ def time_squitter(x: np.ndarray, fs: float, t0_utc: float, nominal_utc: float,
     """
     x = np.asarray(x, dtype=complex)
     tpl = np.asarray(timing_template(), dtype=float)
-    prekey_len = PREKEY_LEN
+    pair_syms = tpl[PREKEY_LEN:]                    # A, A
     sym = fs / SYMBOL_RATE                          # samples per symbol
     if x.ndim != 1 or not np.all(np.isfinite(x)):
         return _not_found("bad_input")
@@ -352,79 +384,75 @@ def time_squitter(x: np.ndarray, fs: float, t0_utc: float, nominal_utc: float,
     if not np.any(x):
         return _not_found("no_peak")
 
-    h_full = _render(tpl, fs)
-    h_pair = _render(tpl[prekey_len:], fs)
-    longest = len(tpl) + M1_LEN + M2_LEN + 2 * _PAD
+    h_pair = _render(pair_syms, fs)
+    longest = len(pair_syms) + M1_LEN + M2_LEN + 2 * _PAD
     # Silence ahead of the window lets every correlation reach negative lags,
-    # so a burst that starts in the window's first few ms, or before it, is
-    # still seen (and then judged truncated, not mistimed).
+    # so a burst near the window's start is still seen (and then judged
+    # truncated, not mistimed).
     lead = int(np.ceil(longest * sym))
     xp = np.concatenate([np.zeros(lead, dtype=complex), x])
 
-    # 1. Coarse: A pair under Doppler hypotheses.
-    best_mag, best_k = -1.0, 0
+    # 1. Coarse: A pair under Doppler hypotheses.  The template's sample 0
+    # sits _PAD symbols before A1.
+    best_mag, best_k, best_hz = -1.0, 0, 0.0
     for hz in np.arange(-_DOPPLER_SPAN_HZ, _DOPPLER_SPAN_HZ + 1e-9, _DOPPLER_STEP_HZ):
         mag = np.abs(_correlate(_rotate(xp, fs, hz), h_pair))
         k = int(np.argmax(mag))
         if mag[k] > best_mag:
-            best_mag, best_k = float(mag[k]), k
-    # The A-pair template's sample 0 sits _PAD symbols before the first A.
-    burst_start = int(round(best_k + (_PAD - prekey_len) * sym))
+            best_mag, best_k, best_hz = float(mag[k]), k, float(hz)
+    a1_coarse = best_k + _PAD * sym
 
-    # 2. Doppler from the pre-key tone.
-    doppler = _doppler_from_prekey(xp, fs, burst_start)
+    # 2. Doppler from the pre-key tone, phase-blind.
+    doppler = _doppler_from_prekey(
+        xp, fs, int(round(a1_coarse - _PREKEY_FFT_FROM_S * fs)),
+        int(round(a1_coarse - _PREKEY_FFT_TO_S * fs)))
+    if not abs(doppler - best_hz) <= _DOPPLER_AGREE_HZ:
+        doppler = best_hz                           # no tone where it should be
     xd = _rotate(xp, fs, doppler)
 
-    # 3. Detection on the whole template.  The median runs over the window's
-    # own lags, so the silent lead does not dilute it.
-    full = np.abs(_correlate(xd, h_full))
-    kf = int(np.argmax(full))
-    peak = float(full[kf])
-    median = float(np.median(full[lead:]))
+    # 3. Detection on the A pair.  The median runs over the window's own
+    # lags, so the silent lead does not dilute it.
+    pair_c = np.abs(_correlate(xd, h_pair))
+    kp = int(np.argmax(pair_c))
+    peak = float(pair_c[kp])
+    median = float(np.median(pair_c[lead:]))
     if not (median > 0 and peak > 0):
         return _not_found("no_peak")
     snr_db = float(20 * np.log10(peak / median))
     if snr_db < FOUND_SNR_DB:
         return _not_found("no_peak", snr_db)
-    far = np.abs(np.arange(len(full)) - kf) > AMBIGUOUS_SEP_S * fs
-    second_far = float(full[far].max()) if far.any() else 0.0
+    sep = np.abs(np.arange(len(pair_c)) - kp) / fs
+    far = (sep > AMBIGUOUS_SEP_S) & ~(np.abs(sep - _SINGLE_A_S) < _SINGLE_A_SKIP_S)
+    second_far = float(pair_c[far].max()) if far.any() else 0.0
 
-    # 4. M1 first, at the whole template's integer peak, so the fine-timing
-    # template can run through it.  It labels the squitter; a wrong or
-    # missing M1 only shortens the fine template.
-    a_coarse = kf + (_PAD + prekey_len) * sym      # first A symbol, samples
-    m1 = _m1_shift(xd, fs, a_coarse)
+    # 4. M1, at the A pair's integer peak.
+    m1 = _m1_shift(xd, fs, kp + _PAD * sym)
     if m1 is None:
-        fine_syms = tpl
+        fine_syms = pair_syms
     else:
         m1_seq = m1_symbols(m1)
-        fine_syms = np.concatenate([tpl, m1_seq, m1_seq[:M2_LEN]])
+        fine_syms = np.concatenate([pair_syms, m1_seq, m1_seq[:M2_LEN]])
 
-    # 5. Fine timing on the whole template, run through M1 and M2 when M1 is
-    # known.  A template cut inside the burst biases the peak through the
-    # pulse tails it shares with the known symbols across the cut.  Measured
-    # at 80 dB on synth_squitter: A pair alone -1.5 us (pre-key before it,
-    # M1 after), pre-key+A+A -0.65 us, +M1 +0.9 us, +M1+M2 -0.55 us (the
-    # synthetic T blocks follow M2).  In a real frame random data follows
-    # M2, so there the edge term averages to zero.  The pedestal stays
-    # smooth across the few samples the parabola sees.
+    # 5. Fine timing on A, A, M1, M2.  A template cut inside the burst picks
+    # up a bias from the pulse tails it shares with the symbols across the
+    # cut: before A1 a pre-key of random phase, after M2 data in a real
+    # frame, so both average to zero (see the report for the sizes).
     h_fine = _render(fine_syms, fs)
     fine = _correlate_fine(xd, h_fine)
     reach = int(_MAIN_SEARCH_S * fs * _UPSAMPLE)
-    lo = max(kf * _UPSAMPLE - reach, 0)
-    hi = min(kf * _UPSAMPLE + reach + 1, len(fine))
+    lo = max(kp * _UPSAMPLE - reach, 0)
+    hi = min(kp * _UPSAMPLE + reach + 1, len(fine))
     j = lo + int(np.argmax(fine[lo:hi]))
-    start_p = (j + _parabola(fine, j)) / _UPSAMPLE + _PAD * sym   # in xp samples
-    start = start_p - lead                                         # in x samples
+    a1_p = (j + _parabola(fine, j)) / _UPSAMPLE + _PAD * sym     # A1, xp samples
+    a1 = a1_p - lead                                             # A1, x samples
 
-    # The whole fine template, pre-key edge to its last symbol, must lie
-    # inside the window; a burst cut at either end times wrongly.
-    if start < 0 or start + len(fine_syms) * sym > len(x):
+    # The fine template, A1 to its last symbol, must lie inside the window.
+    if a1 < 0 or a1 + len(fine_syms) * sym > len(x):
         return _not_found("truncated", snr_db)
 
-    # 6. Width and other paths from the A pair, which has no pedestal.
+    # 6. Width and other paths from the A pair, upsampled.
     pair = _correlate_fine(xd, h_pair)
-    centre = int(round((start_p + (prekey_len - _PAD) * sym) * _UPSAMPLE))
+    centre = int(round((a1_p - _PAD * sym) * _UPSAMPLE))
     lo = max(centre - _UPSAMPLE * 2, 0)
     jp = lo + int(np.argmax(pair[lo:centre + _UPSAMPLE * 2 + 1]))
     width_s = _lobe_width(pair, jp) / (_UPSAMPLE * fs)
@@ -433,38 +461,27 @@ def time_squitter(x: np.ndarray, fs: float, t0_utc: float, nominal_utc: float,
     if second_far >= AMBIGUOUS_RATIO * peak or ratio2 >= AMBIGUOUS_RATIO:
         return _not_found("ambiguous", snr_db)
 
-    # 7. Quality flags; they never move the answer or refuse it.
+    # 7. Quality; it never moves the answer or refuses it.
     # Lobe distortion: the A pair's main lobe against the clean template's.
-    # Noise alone distorts it by up to ~0.8x the correlation's relative noise
-    # (measured -13..10 dB), so the flag threshold rides above that.
-    ref = _correlate_fine(h_fine, h_pair)
+    # Noise alone distorts it by up to ~0.8x the correlation's relative noise,
+    # so the flag threshold rides above that.
+    clean = np.concatenate([np.zeros(len(h_pair), dtype=complex), h_fine])
+    ref = _correlate_fine(clean, h_pair)
     jr = int(np.argmax(ref))
     distortion = _lobe_distortion(pair, jp, ref, jr, fs)
     rel_noise = _noise_sigma(x, fs) * float(np.sqrt(np.sum(np.abs(h_pair) ** 2))) / pair[jp]
     flags = []
-    if not distortion <= max(LOBE_DISTORTION_FLAG, LOBE_NOISE_FACTOR * rel_noise):
+    if distortion > max(LOBE_DISTORTION_FLAG, LOBE_NOISE_FACTOR * rel_noise):
         flags.append("unresolved_multipath")
-    # Pre-key edge, checked only when the pre-key's plateau has the SNR for
-    # it.  A strong plateau with no edge where the A pair puts one (the fit
-    # finds no step, or pins to its search limit) is itself a mismatch.
-    edge_offset_s = float("nan")
-    plateau_snr = _prekey_plateau_snr(xd, fs, start_p)
-    if plateau_snr >= EDGE_MIN_SNR:
-        edge, edge_snr = _prekey_edge(xd, fs, start_p)
-        offset = (edge - start_p) / sym             # symbols
-        pinned = not -_EDGE_PRE_SYM + 0.5 < offset < _EDGE_POST_SYM - 0.5
-        if edge_snr >= EDGE_MIN_SNR and not pinned:
-            edge_offset_s = (edge - start_p) / fs
-            limit = max(PREKEY_EDGE_FLAG_S, 5 * EDGE_SD_K / np.sqrt(edge_snr))
-            if abs(edge_offset_s) > limit:
-                flags.append("prekey_edge_mismatch")
-        elif pinned or edge_snr < _EDGE_MISSING_RATIO * plateau_snr:
-            flags.append("prekey_edge_mismatch")
+    tone_start = _prekey_start(xd, fs, a1_p, lead)
+    prekey_lead_s = (a1_p - tone_start) / fs
 
     # An epoch double resolves only ~0.24 us, so the delay is formed from
     # the small differences first and never by subtracting two epochs.
+    start = a1 - PREKEY_LEN * sym                   # the 448-symbol convention
     delay_s = (t0_utc - nominal_utc) + (start / fs - label_lag_s)
     arrival_utc = t0_utc + (start / fs - label_lag_s)
+    a1_utc = t0_utc + (a1 / fs - label_lag_s)
 
     return Arrival(
         found=True,
@@ -478,6 +495,7 @@ def time_squitter(x: np.ndarray, fs: float, t0_utc: float, nominal_utc: float,
         m1_shift=m1,
         reason="ok",
         lobe_distortion=distortion,
-        prekey_edge_offset_s=float(edge_offset_s),
+        prekey_lead_s=float(prekey_lead_s),
         flags=",".join(flags),
+        a1_utc=float(a1_utc),
     )

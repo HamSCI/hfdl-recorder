@@ -124,7 +124,7 @@ def test_broken_template_fails(monkeypatch):
 
 _NAN_FIELDS = ("arrival_utc", "delay_s", "peak_width_s", "second_peak_ratio",
                "second_peak_delay_s", "doppler_hz", "lobe_distortion",
-               "prekey_edge_offset_s")
+               "prekey_lead_s", "a1_utc")
 
 
 def _assert_not_found(a, reason):
@@ -135,23 +135,28 @@ def _assert_not_found(a, reason):
         assert np.isnan(getattr(a, f)), f
 
 
-@pytest.mark.parametrize("into_window", [0.0045, 0.004, 0.002])
-def test_burst_in_window_first_ms_is_timed(into_window):
-    d = into_window - 0.03
+A1_S = w.PREKEY_LEN / w.SYMBOL_RATE          # nominal start to A1, 248.9 ms
+
+
+@pytest.mark.parametrize("a1_into_window", [0.0045, 0.004, 0.002])
+def test_a1_in_window_first_ms_is_timed(a1_into_window):
+    # The timing needs A1 onward; the pre-key may lie wholly before the window.
+    d = a1_into_window - 0.03 - A1_S
     a = _time(w.synth_squitter(FS, d, snr_db=30, rng=np.random.default_rng(3)))
     assert a.found, a.reason
     assert abs(a.delay_s - d) < 20e-6
+    assert np.isnan(a.prekey_lead_s)                # the tone started before the window
 
 
-@pytest.mark.parametrize("d", [-0.05, -0.1, -0.2])
-def test_burst_before_window_is_truncated(d):
+@pytest.mark.parametrize("d", [-0.28, -0.3, -0.32])   # A1 1-41 ms before the window
+def test_a1_before_window_is_truncated(d):
     a = _time(w.synth_squitter(FS, d, snr_db=20, rng=np.random.default_rng(3)))
     _assert_not_found(a, "truncated")
     assert np.isfinite(a.snr_db)
 
 
 def test_burst_cut_at_window_end_is_truncated():
-    # The window ends 0.35 s into the burst, inside the second A.
+    # The window ends 0.35 s after the nominal start: inside the second A.
     d = (0.03 + 32 / 13) - 0.35 - 0.03
     a = _time(w.synth_squitter(FS, d, snr_db=20, rng=np.random.default_rng(3)))
     _assert_not_found(a, "truncated")
@@ -201,34 +206,77 @@ def test_clean_burst_is_not_flagged(snr):
         a = _time(w.synth_squitter(FS, 0.0101, snr_db=snr,
                                    rng=np.random.default_rng(400 + i)))
         assert a.found, a.reason
-        assert a.flags == "", (snr, i, a.flags, a.lobe_distortion, a.prekey_edge_offset_s)
+        assert a.flags == "", (snr, i, a.flags, a.lobe_distortion)
 
 
-def _short_prekey_squitter(cut, *, snr_db, seed, delay=0.0101):
-    """A squitter whose pre-key is ``cut`` symbols short, A pair in place.
-
-    Built here, not with waveform's burst assembly, so the analyzer's
-    template and this signal no longer share a pre-key length.
-    """
-    rng = np.random.default_rng(seed)
-    a, m1 = w.a_symbols(), w.m1_symbols(0)
-    syms = np.concatenate([np.ones(w.PREKEY_LEN - cut), a, a, m1, m1[:w.M2_LEN],
-                           rng.choice([-1.0, 1.0], size=3000)])
-    n = round((0.03 + 32 / 13) * FS)
-    x = w._render(syms, FS, n, 0.03 + delay + cut / w.SYMBOL_RATE, 0.35)
-    p = np.mean(np.abs(x[np.abs(x) > 0]) ** 2)
-    sigma = np.sqrt(p / 10 ** (snr_db / 10) / 2)
-    return x + sigma * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+@pytest.mark.parametrize("phase", np.linspace(0, 2 * np.pi, 8, endpoint=False))
+def test_realistic_prekey_times_on_a1(phase):
+    # A 415-symbol pre-key at a set phase against the A pair, as Riverhead
+    # keys it.  The old full-template detector called phases 2.4-3.9 rad
+    # ambiguous: there the tone cancels the A pair at the true lag, and the
+    # tone's broad triangle wins 50 ms away.
+    d = 0.0101
+    a = _time(w.synth_squitter(FS, d, snr_db=10, prekey_phase=phase,
+                               rng=np.random.default_rng(600)))
+    assert a.found, a.reason
+    assert abs(a.delay_s - d) < 20e-6
+    assert a.a1_utc == pytest.approx(a.arrival_utc + A1_S, abs=1e-6)
 
 
-def test_short_prekey_is_flagged():
-    a = _time(_short_prekey_squitter(2, snr_db=20, seed=3))
-    assert a.found
-    assert "prekey_edge_mismatch" in a.flags.split(",")
-    assert a.prekey_edge_offset_s == pytest.approx(2 / w.SYMBOL_RATE, abs=200e-6)
+@pytest.mark.parametrize("prekey_len", [415, 448, 380])
+def test_prekey_lead_measured(prekey_len):
+    x = w.synth_squitter(FS, 0.0101, snr_db=20, prekey_len=prekey_len,
+                         rng=np.random.default_rng(8))
+    a = _time(x)
+    assert a.found, a.reason
+    assert a.prekey_lead_s == pytest.approx(prekey_len / w.SYMBOL_RATE, abs=150e-6)
 
 
-def test_normal_prekey_edge_agrees():
-    a = _time(_short_prekey_squitter(0, snr_db=20, seed=3))
-    assert a.found and a.flags == ""
-    assert abs(a.prekey_edge_offset_s) < 100e-6
+def test_prekey_lead_weak_tone_still_coarse():
+    # At -5 dB per sample the step fit cannot refine it, but the CUSUM still
+    # places the tone's start to a few ms.
+    x = w.synth_squitter(FS, 0.0101, snr_db=-5, rng=np.random.default_rng(8))
+    a = _time(x)
+    assert a.found, a.reason
+    assert a.prekey_lead_s == pytest.approx(415 / w.SYMBOL_RATE, abs=5e-3)
+
+
+def test_no_prekey_leaves_lead_nan_and_times_anyway():
+    x = w.synth_squitter(FS, 0.0101, snr_db=20, prekey_len=0, rng=np.random.default_rng(8))
+    a = _time(x)
+    assert a.found, a.reason
+    assert abs(a.delay_s - 0.0101) < 20e-6
+    assert np.isnan(a.prekey_lead_s)
+
+
+# --- Real windows: AC0G-ND, Riverhead (gs 4) on 8912 kHz, 2026-11-02 ---------
+# Expected delays from the debugging prototype (A pair + M1 + M2, pre-key
+# for Doppler only).  Real delays follow a sawtooth across frames, so each
+# window is checked against its own value, never a constant.
+
+FIXTURES = __import__("pathlib").Path(__file__).parent / "fixtures" / "squitters"
+
+
+def _real(name):
+    import json
+    with np.load(FIXTURES / name) as z:
+        x = np.asarray(z["x"], dtype=complex)
+        meta = json.loads(str(z["meta"]))
+    return an.time_squitter(x, meta["fs"], meta["t0_utc"], meta["nominal_utc"])
+
+
+@pytest.mark.parametrize("name,delay", [("4-8912-2558.npz", 0.0234992),   # was ambiguous
+                                        ("4-8912-2566.npz", 0.0209063)])  # was found, late
+def test_real_riverhead_found(name, delay):
+    a = _real(name)
+    assert a.found and a.reason == "ok"
+    assert abs(a.delay_s - delay) < 20e-6
+    assert a.m1_shift == 0
+    assert a.doppler_hz == pytest.approx(-2.3, abs=0.5)
+    assert a.prekey_lead_s == pytest.approx(0.2305, abs=0.006)
+
+
+def test_real_riverhead_weak_refused():
+    # dumphfdl could not decode frame 2550 either.
+    a = _real("4-8912-2550.npz")
+    assert not a.found and a.reason == "no_peak"

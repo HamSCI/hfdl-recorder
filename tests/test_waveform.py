@@ -46,7 +46,8 @@ def test_template_layout():
 
 def test_synth_burst_lands_where_asked():
     fs = 6000
-    x = w.synth_squitter(fs, 0.0123, snr_db=40, rng=np.random.default_rng(1))
+    x = w.synth_squitter(fs, 0.0123, snr_db=40, prekey_len=w.PREKEY_LEN,
+                         prekey_phase=0.0, rng=np.random.default_rng(1))
     assert len(x) == round((0.03 + 32 / 13) * fs)
     env = np.abs(x)
     onset = np.argmax(env > 0.5 * np.median(env[len(env) // 2:]))
@@ -56,10 +57,41 @@ def test_synth_burst_lands_where_asked():
 def test_synth_onset_tight_at_high_rate():
     # 18 kS/s: a half-symbol convention error would move onset by ~5 samples.
     fs = 18000
-    x = w.synth_squitter(fs, 0.0123, snr_db=40, rng=np.random.default_rng(1))
+    x = w.synth_squitter(fs, 0.0123, snr_db=40, prekey_len=w.PREKEY_LEN,
+                         prekey_phase=0.0, rng=np.random.default_rng(1))
     env = np.abs(x)
     onset = np.argmax(env > 0.5 * np.median(env[len(env) // 2:]))
     assert abs(onset / fs - 0.0423) < 1 / fs
+
+
+def test_short_prekey_starts_late_and_a1_stays_put():
+    # A 415-symbol pre-key starts 33 symbols after the nominal start; the A
+    # pair does not move, and a pre-key phase leaves A untouched.
+    fs = 18000
+    full = w.synth_squitter(fs, 0.0123, prekey_len=w.PREKEY_LEN, prekey_phase=0.0,
+                            snr_db=200, rng=np.random.default_rng(1))
+    short = w.synth_squitter(fs, 0.0123, prekey_len=415, prekey_phase=1.0,
+                             snr_db=200, rng=np.random.default_rng(1))
+    env = np.abs(short)
+    onset = np.argmax(env > 0.5 * np.median(env[len(env) // 2:]))
+    assert abs(onset / fs - (0.0423 + 33 / w.SYMBOL_RATE)) < 1 / fs
+    a1 = int(round((0.0423 + w.PREKEY_LEN / w.SYMBOL_RATE) * fs))
+    seg = slice(a1 + 20 * 10, a1 + 200 * 10)       # well inside A1/A2
+    assert np.allclose(short[seg], full[seg], atol=1e-6)
+    pre = slice(a1 - 200 * 10, a1 - 20 * 10)       # inside both pre-keys
+    # Same tone, rotated by one constant phase (the set phase plus the
+    # subcarrier phase the later start carries).
+    ratio = short[pre] / full[pre]
+    assert np.allclose(np.abs(ratio), 1.0, atol=1e-6)
+    assert np.allclose(ratio, ratio[0], atol=1e-6)
+
+
+def test_prekey_phase_is_random_by_default():
+    fs = 6000
+    a = w.synth_squitter(fs, 0.01, snr_db=200, rng=np.random.default_rng(1))
+    b = w.synth_squitter(fs, 0.01, snr_db=200, rng=np.random.default_rng(2))
+    i = int(round((0.04 + 0.1) * fs))               # inside the pre-key
+    assert abs(np.angle(a[i] / b[i])) > 1e-3
 
 
 def test_fractional_delay_is_exact():
