@@ -155,7 +155,41 @@ def build_parser() -> argparse.ArgumentParser:
                         help="write per-band median lag here")
     _add_common(sub_lc)
 
+    sub_sq = subparsers.add_parser(
+        "squitter-analyze",
+        help="time saved squitter windows into the local squitter_timing table",
+    )
+    sub_sq.add_argument("--dir", type=Path,
+                        default=Path("/var/lib/hfdl-recorder/squitters"),
+                        help="window directory ([timing_squitters] window_dir)")
+    sub_sq.add_argument("--radiod-id", default=None,
+                        help="analyse this radiod's windows only")
+    sub_sq.add_argument("--since", default=None,
+                        help="skip windows nominally before this UTC time "
+                             "(ISO 8601, or Unix seconds)")
+    sub_sq.add_argument("--csv", type=Path, default=None,
+                        help="also write the rows to this CSV file")
+    sub_sq.add_argument("--registration-dir", type=Path,
+                        default=Path("/var/lib/timestd/t3_shadow"),
+                        help="hf-timestd T3 shadow minute rows (read only)")
+    sub_sq.add_argument("--max", type=int, default=2000, dest="max_windows",
+                        help="analyse at most this many windows per run")
+    _add_common(sub_sq)
+
     return parser
+
+
+def _parse_since(text):
+    if text is None:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
 
 
 def main():
@@ -208,6 +242,11 @@ def main():
     elif args.command == "label-check":
         from hfdl_recorder.timing.label_check import run_label_check
         sys.exit(run_label_check(args))
+    elif args.command == "squitter-analyze":
+        from hfdl_recorder.timing.batch import run_batch
+        run_batch(args.dir, registration_dir=args.registration_dir,
+                  since=_parse_since(args.since), radiod_id=args.radiod_id,
+                  max_windows=args.max_windows, csv_path=args.csv)
     else:
         parser.print_help()
         sys.exit(1)

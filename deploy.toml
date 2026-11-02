@@ -37,6 +37,16 @@ src  = "systemd/hfdl-recorder@.service"
 dst  = "/etc/systemd/system/hfdl-recorder@.service"
 
 [[install.steps]]
+kind = "link"
+src  = "systemd/hfdl-recorder-squitters@.service"
+dst  = "/etc/systemd/system/hfdl-recorder-squitters@.service"
+
+[[install.steps]]
+kind = "link"
+src  = "systemd/hfdl-recorder-squitters@.timer"
+dst  = "/etc/systemd/system/hfdl-recorder-squitters@.timer"
+
+[[install.steps]]
 kind     = "render"
 src      = "config/hfdl-recorder-config.toml.template"
 dst      = "/etc/hfdl-recorder/hfdl-recorder-config.toml"
@@ -57,6 +67,11 @@ mode  = "0755"
 [systemd]
 units = []
 templated_units = ["hfdl-recorder@.service"]
+# The squitter batch analyser's units are linked by the install steps above
+# but not listed here: sigmond enables and starts what this table names, and
+# the analyser stays disabled.  Enable it per radiod, once [timing_squitters]
+# is on and windows accumulate:
+#   systemctl enable --now hfdl-recorder-squitters@<radiod>.timer
 
 # CONTRACT v0.6 §17 — local sink for `hfdl.spots`.  An in-process
 # tailer thread parses the JSON-per-line file dumphfdl writes at

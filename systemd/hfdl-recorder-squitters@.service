@@ -1,0 +1,40 @@
+[Unit]
+Description=hfdl-recorder squitter timing batch analysis for radiod %i
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=hfdlrec
+Group=hfdlrec
+
+EnvironmentFile=-/etc/sigmond/coordination.env
+EnvironmentFile=-/etc/hfdl-recorder/env/%i.env
+
+WorkingDirectory=/opt/git/sigmond/hfdl-recorder
+
+# At most 2000 windows per run, so one run never lasts hours.  Windows
+# land in /var/lib/hfdl-recorder/squitters/<radiod_id>/<day>/.
+ExecStart=/opt/git/sigmond/hfdl-recorder/venv/bin/python3 -m hfdl_recorder.cli squitter-analyze \
+    --dir /var/lib/hfdl-recorder/squitters \
+    --radiod-id %i \
+    --registration-dir /var/lib/timestd/t3_shadow \
+    --max 2000
+
+# The analysis yields to everything else on the station.
+Nice=19
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+MemoryMax=2G
+MemorySwapMax=0
+TimeoutStartSec=1h
+
+StandardOutput=journal
+StandardError=inherit
+SyslogIdentifier=hfdl-recorder-squitters@%i
+
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/hfdl-recorder /var/lib/sigmond /var/log/hfdl-recorder
+ReadOnlyPaths=/etc/hfdl-recorder /opt/git/sigmond/hfdl-recorder /var/lib/timestd

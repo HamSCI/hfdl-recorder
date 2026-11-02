@@ -1,0 +1,11 @@
+[Unit]
+Description=Run hfdl-recorder squitter timing analysis for radiod %i every 15 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=15min
+RandomizedDelaySec=60
+Unit=hfdl-recorder-squitters@%i.service
+
+[Install]
+WantedBy=timers.target
