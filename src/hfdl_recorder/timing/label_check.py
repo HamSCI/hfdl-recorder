@@ -237,29 +237,63 @@ def _label(collector, info, rate, authority_reader):
 
 
 # The probe lives on a finite lifetime so a crash leaves a short orphan, and a
-# keep-alive (a command carrying LIFETIME; bare polls do not refresh) runs
-# during capture.  Removal sets lifetime 1: radiod reaps a channel only when
-# its lifetime runs out, so a 0 Hz "removed" channel with lifetime 0
-# (infinite) never goes away and the next repeat would be handed it back.
+# keep-alive (a command carrying LIFETIME) runs during capture.  Removal sets
+# lifetime 1: radiod reaps a channel only when its lifetime runs out.
+#
+# Channel hygiene.  On radiod, ANY command addressed to one SSRC (a poll, a
+# tune, a LIFETIME) goes through lookup_or_create_chan (radio_status.c): an
+# unknown SSRC is minted from the template, whose lifetime 0 means infinite.
+# And every command restarts the countdown.  So label-check sends the probe
+# SSRC only the create (inside add_channel), LIFETIME keep-alives during
+# capture, and the final LIFETIME 1, which is always the last command it
+# receives.  Presence is judged by discovery alone: a poll of SSRC 0xffffffff
+# lists running channels and mints nothing.
 PROBE_LIFETIME_FRAMES = 1000        # ~20 s at 50 frames/s
 KEEPALIVE_SEC = 3.0
 REAP_TIMEOUT_SEC = 30.0
+DISCOVER_LISTEN_SEC = 3.0
 
 
-def _gone(control, ssrc: int) -> bool:
-    return control.poll_channel(ssrc, timeout=1.0, allow_idle=True) is None
+def _discover_ssrcs(control) -> set[int] | None:
+    """SSRCs radiod lists as running, or None when the listen heard nothing.
+
+    Uses ka9q's native listener directly: ``discover_channels`` falls back to
+    the ``control`` utility when the listen comes back empty, and nothing on
+    that path may address the probe SSRC.
+    """
+    from ka9q.discovery import discover_channels_native
+
+    chans = discover_channels_native(control.status_address,
+                                     listen_duration=DISCOVER_LISTEN_SEC)
+    return set(chans) if chans else None
 
 
-def _wait_gone(control, ssrc: int, timeout: float | None = None) -> bool:
-    """Wait until radiod no longer answers for ``ssrc``; False on timeout."""
+def _listed(control, ssrc: int, ref_ssrc: int) -> bool | None:
+    """Is ``ssrc`` running on radiod?  None when discovery cannot say.
+
+    The reference channel must appear in the listing; a listing without it
+    proves only that the listen missed packets.
+    """
+    seen = _discover_ssrcs(control)
+    if seen is None or ref_ssrc not in seen:
+        return None
+    return ssrc in seen
+
+
+def _wait_gone(control, ssrc: int, ref_ssrc: int,
+               timeout: float | None = None) -> bool:
+    """Wait until discovery no longer lists ``ssrc``; False on timeout.
+
+    Sends nothing to ``ssrc``.
+    """
     if timeout is None:
         timeout = REAP_TIMEOUT_SEC
     t_end = time.time() + timeout
     while True:
-        if _gone(control, ssrc):
+        if _listed(control, ssrc, ref_ssrc) is False:
             return True
         if time.time() >= t_end:
-            logger.error("probe SSRC %d still answering after %.0f s",
+            logger.error("probe SSRC %d still listed by radiod after %.0f s",
                          ssrc, timeout)
             return False
         time.sleep(1.0)
@@ -273,14 +307,16 @@ def _rtp_labelled(anchor) -> bool:
 def _reap_probe(control, probe_ssrc: int, ref_ssrc: int) -> bool:
     """Reap our probe channel (lifetime 1, then wait); never hf-timestd's.
 
-    Returns True once radiod no longer answers for the SSRC.
+    LIFETIME 1 is safe even for an SSRC radiod does not hold: the command
+    mints it with lifetime 1, and it dies on the next frame.  Returns True
+    once discovery no longer lists the SSRC.
     """
     if probe_ssrc == ref_ssrc:
         raise SystemExit(
             f"label-check: probe SSRC {probe_ssrc} equals the reference "
             f"SSRC; refusing to remove hf-timestd's channel")
     control.set_channel_lifetime(probe_ssrc, 1)
-    return _wait_gone(control, probe_ssrc)
+    return _wait_gone(control, probe_ssrc, ref_ssrc)
 
 
 def _probe_ssrc(control, freq_hz: float, band) -> int:
@@ -295,12 +331,39 @@ def _probe_ssrc(control, freq_hz: float, band) -> int:
         encoding=HFDL_ENCODING, radiod_host=control.status_address)
 
 
-def _keepalive(multi, ssrc: int, stop: threading.Event) -> None:
-    while not stop.wait(KEEPALIVE_SEC):
-        try:
-            multi.set_channel_lifetime(ssrc, PROBE_LIFETIME_FRAMES)
-        except Exception:  # noqa: BLE001 - the capture will time out instead
-            logger.exception("probe keep-alive failed")
+class _KeepAlive:
+    """Refreshes the probe's lifetime during capture.
+
+    Each refresh runs under a lock and checks the stop flag inside it, so
+    once ``stop()`` returns no refresh can reach radiod, not even one that
+    had already woken: the reap's LIFETIME 1 stays the last command.
+    """
+
+    def __init__(self, multi, ssrc: int):
+        self._multi = multi
+        self._ssrc = ssrc
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(KEEPALIVE_SEC):
+            with self._lock:
+                if self._stop.is_set():
+                    return
+                try:
+                    self._multi.set_channel_lifetime(
+                        self._ssrc, PROBE_LIFETIME_FRAMES)
+                except Exception:  # noqa: BLE001 - capture times out instead
+                    logger.exception("probe keep-alive failed")
+
+    def stop(self) -> None:
+        with self._lock:            # waits out a refresh in flight
+            self._stop.set()
+        self._thread.join(timeout=KEEPALIVE_SEC + 5.0)
 
 
 def _run_repeat(i, *, control, ref, band, seconds, reader, label_fn=_label,
@@ -318,14 +381,20 @@ def _run_repeat(i, *, control, ref, band, seconds, reader, label_fn=_label,
     from hfdl_recorder.core.radiod import HFDL_ENCODING, HFDL_PRESET
 
     # A probe left from an earlier run would be handed back by ensure_channel
-    # (same SSRC): no fresh RTP origin.  Reap it before creating.
+    # (same SSRC): no fresh RTP origin.  Look for it by discovery (a poll
+    # would mint it) and reap it before creating.
     want = _probe_ssrc(control, float(ref.frequency), band)
     if want == ref.ssrc:
         raise SystemExit(
             f"label-check: probe SSRC {want} equals the reference SSRC; "
             f"refusing to continue")
-    if not _gone(control, want):
-        logger.warning("probe SSRC %d already present; reaping it", want)
+    present = _listed(control, want, ref.ssrc)
+    if present is not False:
+        if present:
+            logger.warning("probe SSRC %d already running; reaping it", want)
+        else:
+            logger.warning("discovery inconclusive for probe SSRC %d; "
+                           "reaping it to be sure", want)
         if not _reap_probe(control, want, ref.ssrc):
             print(f"label-check: repeat {i}: stale probe {want} would not "
                   f"go away; repeat failed", file=sys.stderr)
@@ -336,10 +405,16 @@ def _run_repeat(i, *, control, ref, band, seconds, reader, label_fn=_label,
     probe_c = _Collector(int(seconds * band.samprate_hz))
     ref_stream = ref_stream_cls(channel=ref, on_samples=ref_c)
     probe_ms = multi_cls(control=control)
-    probe_info = probe_ms.add_channel(
-        frequency_hz=float(ref.frequency), preset=HFDL_PRESET,
-        sample_rate=band.samprate_hz, encoding=HFDL_ENCODING,
-        on_samples=probe_c, lifetime=PROBE_LIFETIME_FRAMES)
+    try:
+        probe_info = probe_ms.add_channel(
+            frequency_hz=float(ref.frequency), preset=HFDL_PRESET,
+            sample_rate=band.samprate_hz, encoding=HFDL_ENCODING,
+            on_samples=probe_c, lifetime=PROBE_LIFETIME_FRAMES)
+    except BaseException:
+        # ensure_channel's pre-poll mints the SSRC with infinite lifetime;
+        # if the create never landed, that channel would stay for good.
+        _reap_probe(control, want, ref.ssrc)
+        raise
     if probe_info.ssrc == ref.ssrc:
         raise SystemExit(
             f"label-check: probe SSRC {probe_info.ssrc} equals the reference "
@@ -347,10 +422,8 @@ def _run_repeat(i, *, control, ref, band, seconds, reader, label_fn=_label,
             f"channel is left on radiod, because removing it would remove "
             f"the reference")
     ok = False
-    stop_ka = threading.Event()
-    ka = threading.Thread(target=_keepalive,
-                          args=(probe_ms, probe_info.ssrc, stop_ka),
-                          daemon=True)
+    reaped = False
+    ka = _KeepAlive(probe_ms, probe_info.ssrc)
     try:
         ka.start()
         probe_ms.start()
@@ -358,10 +431,22 @@ def _run_repeat(i, *, control, ref, band, seconds, reader, label_fn=_label,
         limit = seconds + 30
         ok = probe_c.done.wait(limit) and ref_c.done.wait(limit)
     finally:
-        stop_ka.set()
-        ref_stream.stop()
-        probe_ms.stop()
-        reaped = _reap_probe(control, probe_info.ssrc, ref.ssrc)
+        # The reap must run whatever fails here, and must come last: no
+        # keep-alive after it, and no MultiStream restore (prune empties the
+        # slots the health monitor would re-create).
+        try:
+            ka.stop()
+            try:
+                prune = getattr(probe_ms, "prune_frequency", None)  # >=3.17
+                if prune is not None:
+                    prune(float(ref.frequency))
+            finally:
+                try:
+                    ref_stream.stop()
+                finally:
+                    probe_ms.stop()
+        finally:
+            reaped = _reap_probe(control, probe_info.ssrc, ref.ssrc)
     if not reaped:
         print(f"label-check: repeat {i}: probe {probe_info.ssrc} still "
               f"present after {REAP_TIMEOUT_SEC:.0f} s; repeat failed (a "
