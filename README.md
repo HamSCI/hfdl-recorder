@@ -163,6 +163,50 @@ not running ka9q-radio already, and is **not needed here**.  Our
 daemon talks to airframes directly via `dumphfdl`'s own `--output
 decoded:json:tcp:…` sink.
 
+## Squitter timing (off by default)
+
+HFDL ground stations transmit a squitter at a fixed slot of a fixed 32 s
+frame, and the slot sits on UTC.  The squitter-timing feature measures when
+each squitter arrives, against the station's own registered sample clock.
+That gives a propagation delay per ground station, per band, per squitter.
+
+With `[timing_squitters] enabled = false` (the default) the recorder saves
+nothing extra, and decoding runs as it always has.
+
+Turned on, each enabled band keeps a short window of IQ around each squitter
+from the ground stations you list: 6 kS/s, about 2.5 s and 120 kB per window,
+about 2 GB a day.  Each window file carries its own UTC label and the radiod
+sample index of its first sample.  The windows land in
+`/var/lib/hfdl-recorder/squitters/<radiod_id>/<YYYYMMDD>/`.  The recorder
+deletes them after `retention_days`, and stops saving (never decoding) when
+free space falls below `min_free_gb`.
+
+A batch analyser times the saved windows.  It writes one row per window to
+the local `hfdl.squitter_timing` table in sigmond's sink, and it converts
+each arrival to UTC through hf-timestd's minute registration
+(`/var/lib/timestd/t3_shadow`, read only).
+
+To turn it on:
+
+```bash
+# 1. In /etc/hfdl-recorder/hfdl-recorder-config.toml:
+#      [timing_squitters]
+#      enabled = true
+#    window_dir must stay under /var/lib/hfdl-recorder.
+sudo systemctl restart hfdl-recorder@<radiod-id>
+# 2. Once windows accumulate, time them every 15 minutes:
+sudo systemctl enable --now hfdl-recorder-squitters@<radiod-id>.timer
+```
+
+Nothing leaves the station.  The windows stay on local disk, and the sink
+marks every `squitter_timing` row local, so hs-uploader never ships one.
+The nightly `smd admin storage trim --all` covers no local table, so the
+rows accumulate until an operator trims them, for example
+`smd admin storage trim --target-db hfdl --target-table squitter_timing --max-age 30d --yes`.
+
+Off the station, the same analyser runs without sigmond:
+`hfdl-recorder squitter-analyze --dir <windows> --no-sink --jsonl rows.jsonl`.
+
 ## Documentation
 
 - [`docs/HFDL.md`](docs/HFDL.md) — what HFDL is, how the

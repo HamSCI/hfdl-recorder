@@ -55,6 +55,11 @@ PrivateTmp=false
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/lib/hfdl-recorder /var/log/hfdl-recorder
+# The hfdl.spots tailer writes sigmond's sink (/var/lib/sigmond/sink.db,
+# root:sigmond 0664 in a 2775 dir; hfdlrec joins the sigmond group via
+# install.sh) and hs-uploader's watermarks.  Without these paths every
+# insert fails "attempt to write a readonly database".  Same as psk-recorder.
+ReadWritePaths=-/var/lib/hs-uploader -/var/lib/sigmond
 ReadOnlyPaths=/etc/hfdl-recorder /opt/git/sigmond/hfdl-recorder
 PrivateNetwork=false
 

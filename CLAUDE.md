@@ -53,9 +53,12 @@ hfdl-recorder version --json        # version + git sha
 hfdl-recorder status                # health check
 hfdl-recorder config init|edit      # whiptail wizard via sigmond.wizard_dispatch
 hfdl-recorder daemon --config /etc/hfdl-recorder/hfdl-recorder-config.toml --radiod-id my-rx888
+hfdl-recorder squitter-analyze --radiod-id my-rx888     # time saved squitter windows
+hfdl-recorder squitter-analyze --dir W --no-sink --jsonl rows.jsonl   # off-station, no sigmond
+hfdl-recorder label-check --radiod-id my-rx888 --ref-freq-hz 10000000 --band HFDL13
 ```
 
-The test suite is moderate (~88 tests). When iterating, target the
+The test suite is moderate (~309 tests). When iterating, target the
 affected file with `uv run pytest tests/test_<area>.py -v` rather than
 the whole suite.
 
@@ -107,10 +110,13 @@ src/hfdl_recorder/
   timing/             # squitter timing (off by default: [timing_squitters])
     frame_grid.py     # HFDL frame/slot grid on UTC
     waveform.py       # HFDL waveform constants, synthetic squitters
-    analyzer.py       # batch: time one saved squitter window
-    label_check.py    # label-check CLI (probe channel vs hf-timestd)
+    analyzer.py       # time one saved squitter window (ANALYZER_VERSION)
+    batch.py          # squitter-analyze: windows -> squitter_timing rows
+    label_check.py    # label-check CLI (probe channel vs hf-timestd; diagnostic only)
     window_keeper.py  # live: saves labelled 6 kS/s windows around squitters
     channel_status.py # band channel's counter map + least-late anchor
+tools/
+  squitter_eval.py    # devbox only: offline evaluation of squitter_timing rows
 tests/
   test_contract.py
   test_config.py
@@ -121,7 +127,9 @@ tests/
 config/
   hfdl-recorder-config.toml.template
 systemd/
-  hfdl-recorder@.service   # Template unit; %i = radiod_id
+  hfdl-recorder@.service              # Template unit; %i = radiod_id
+  hfdl-recorder-squitters@.service    # oneshot squitter-analyze (not enabled by default)
+  hfdl-recorder-squitters@.timer      # every 15 min, once enabled
 scripts/
   install.sh          # First-run bootstrap (Pattern A) + dumphfdl build
   deploy.sh           # Editable-install refresh
@@ -203,6 +211,12 @@ Sections implemented:
 - JSON spool: `/var/lib/hfdl-recorder/<radiod_id>/<BAND>.json`
 - systable: `/var/lib/hfdl-recorder/systable.conf` (auto-updated)
 - Per-band logs: `/var/log/hfdl-recorder/<radiod_id>-<BAND>.log` (dumphfdl stderr)
+- Squitter windows (only with `[timing_squitters] enabled`):
+  `/var/lib/hfdl-recorder/squitters/<radiod_id>/<YYYYMMDD>/<gs>-<kHz>-<frame>.npz`,
+  each with a `.done` marker once analysed (it holds the analyser version)
+- Squitter timing rows: `hfdl.squitter_timing` in `/var/lib/sigmond/sink.db`
+  (local rows, never uploaded; no automatic trim)
+- label-check result: `/var/lib/hfdl-recorder/label_check_results.toml` (nothing reads it)
 - Process log: systemd journal (`StandardOutput=journal`) —
   `journalctl -u hfdl-recorder@<radiod_id>` or `smd log hfdl-recorder`
 - Venv: `/opt/git/sigmond/hfdl-recorder/venv`

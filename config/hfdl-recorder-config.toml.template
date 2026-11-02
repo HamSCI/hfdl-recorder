@@ -42,6 +42,9 @@ airframes_io = false  # opt-in: TCP push to feed.airframes.io:5556
 enabled = false
 # Names exactly as dumphfdl reports them (spdu.src.name).
 ground_stations = ["Riverhead, New York", "San Francisco, California", "Molokai, Hawaii"]
+# window_dir must stay under /var/lib/hfdl-recorder: the systemd units
+# (ProtectSystem=strict) let the daemon and the batch analyser write there
+# and nowhere else.  The batch reads this same key.
 window_dir = "/var/lib/hfdl-recorder/squitters"
 retention_days = 5
 min_free_gb = 5

@@ -12,10 +12,13 @@ EnvironmentFile=-/etc/hfdl-recorder/env/%i.env
 
 WorkingDirectory=/opt/git/sigmond/hfdl-recorder
 
-# At most 2000 windows per run, so one run never lasts hours.  Windows
-# land in /var/lib/hfdl-recorder/squitters/<radiod_id>/<day>/.
+# At most 2000 windows per run, so one run never lasts hours.  The window
+# directory comes from the config's [timing_squitters] window_dir, resolved
+# as the daemon resolves it (--instance %i), so the two never disagree.  It
+# must lie under /var/lib/hfdl-recorder, the only window path both units
+# may write.  Exit status 1 means the run stopped on its store.
 ExecStart=/opt/git/sigmond/hfdl-recorder/venv/bin/python3 -m hfdl_recorder.cli squitter-analyze \
-    --dir /var/lib/hfdl-recorder/squitters \
+    --instance %i \
     --radiod-id %i \
     --registration-dir /var/lib/timestd/t3_shadow \
     --max 2000
@@ -38,4 +41,6 @@ ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/lib/hfdl-recorder /var/log/hfdl-recorder
 ReadWritePaths=-/var/lib/hs-uploader -/var/lib/sigmond
-ReadOnlyPaths=/etc/hfdl-recorder /opt/git/sigmond/hfdl-recorder /var/lib/timestd
+# "-": a station without hf-timestd still starts the unit (rows then carry
+# no counter label).
+ReadOnlyPaths=/etc/hfdl-recorder /opt/git/sigmond/hfdl-recorder -/var/lib/timestd
