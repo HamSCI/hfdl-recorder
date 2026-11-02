@@ -77,16 +77,19 @@ else
 fi
 _ensure_uv || { ui_error "_ensure_uv failed"; exit 1; }
 
-# --- Phase 0.6: ensure ka9q-python sibling repo is on disk ---
-# pyproject.toml's [tool.uv.sources] declares ka9q-python as a path-based
-# editable dep at ../ka9q-python.  uv sync needs the directory to exist
-# at /opt/git/sigmond/ka9q-python or it fails.
-if [[ ! -f /opt/git/sigmond/ka9q-python/pyproject.toml ]]; then
-    ui_info "ka9q-python sibling repo not at /opt/git/sigmond/ka9q-python -- cloning"
-    mkdir -p /opt/git/sigmond
-    git clone https://github.com/HamSCI/ka9q-python /opt/git/sigmond/ka9q-python \
-        || { ui_error "Failed to clone ka9q-python"; exit 1; }
-fi
+# --- Phase 0.6: ensure the sibling repos are on disk ---
+# pyproject.toml's [tool.uv.sources] declares ka9q-python and hamsci-dsp as
+# path-based editable deps at ../ka9q-python and ../hamsci-dsp.  uv sync
+# needs both directories under /opt/git/sigmond or it fails; hamsci-dsp is
+# not on PyPI, so nothing else provides it.
+mkdir -p /opt/git/sigmond
+for sib in ka9q-python hamsci-dsp; do
+    if [[ ! -f "/opt/git/sigmond/$sib/pyproject.toml" ]]; then
+        ui_info "$sib sibling repo not at /opt/git/sigmond/$sib -- cloning"
+        git clone "https://github.com/HamSCI/$sib" "/opt/git/sigmond/$sib" \
+            || { ui_error "Failed to clone $sib"; exit 1; }
+    fi
+done
 
 # --- Phase 1: service user ---
 if ! id -u "$SERVICE_USER" &>/dev/null; then
@@ -94,6 +97,21 @@ if ! id -u "$SERVICE_USER" &>/dev/null; then
     useradd --system --shell /usr/sbin/nologin \
             --home-dir /nonexistent --no-create-home \
             "$SERVICE_USER"
+fi
+
+# Add the service user to the sigmond supplementary group so the spot
+# tailer and the squitter batch can write /var/lib/sigmond/sink.db
+# (root:sigmond 0664, dir 2775) and /var/lib/hs-uploader.  Without it every
+# hfdl.spots insert fails "attempt to write a readonly database".  The
+# sigmond group comes from sigmond/install.sh; if it has not run yet, skip
+# -- re-run this installer afterwards.  (Same as psk-recorder.)
+if getent group sigmond &>/dev/null; then
+    if ! id -nG "$SERVICE_USER" 2>/dev/null | tr ' ' '\n' | grep -qx sigmond; then
+        usermod -a -G sigmond "$SERVICE_USER"
+        ui_info "Added $SERVICE_USER to sigmond group"
+    fi
+else
+    ui_info "sigmond group not present yet -- re-run after sigmond install"
 fi
 
 # --- Phase 2: repo + venv ---
@@ -129,7 +147,7 @@ fi
 # itself editable, and pins exactly what's in uv.lock.  --no-dev skips
 # dev extras (pytest etc.); --frozen requires uv.lock to be current
 # (regenerate locally with `uv lock` if siblings or deps have shifted).
-ui_info "Syncing hfdl-recorder + ka9q-python (editable) into $VENV_DIR"
+ui_info "Syncing hfdl-recorder + ka9q-python + hamsci-dsp (editable) into $VENV_DIR"
 UV_PROJECT_ENVIRONMENT="$VENV_DIR" \
     uv sync --project "$REPO_SOURCE" --frozen --no-dev --quiet
 
@@ -184,10 +202,14 @@ for dir in "$SPOOL_DIR" "$LOG_DIR"; do
 done
 
 # --- Phase 6: systemd ---
-ui_info "Installing systemd unit template"
-install -o root -g root -m 644 \
-    "$REPO_SOURCE/systemd/hfdl-recorder@.service" \
-    /etc/systemd/system/hfdl-recorder@.service
+ui_info "Installing systemd unit templates"
+# The squitter batch units are installed but never enabled here: enable
+# per radiod once [timing_squitters] is on (see README).
+for unit in hfdl-recorder@.service hfdl-recorder-squitters@.service \
+            hfdl-recorder-squitters@.timer; do
+    install -o root -g root -m 644 \
+        "$REPO_SOURCE/systemd/$unit" "/etc/systemd/system/$unit"
+done
 systemctl daemon-reload
 
 # --- Phase 7: disable ka9q-radio's hfdl.service if active ---

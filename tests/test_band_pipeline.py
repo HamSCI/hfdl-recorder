@@ -315,3 +315,22 @@ def test_channel_frequency_follows_channel_info():
     assert pipeline.channel_freq_hz == 13_310_002.0
     pipeline._on_stream_restored(SimpleNamespace(ssrc=0x20, frequency=0.0))
     assert pipeline.channel_freq_hz == 13_310_002.0     # 0 means unknown
+
+
+def test_keeper_without_rtp_logs_once(caplog):
+    """An old ka9q-python gives no delivered_rtp_start: the keeper never
+    feeds, and the journal must say so once, not stay silent or flood."""
+    import logging
+    rec = _RecordingKeeper()
+    pipeline = BandPipeline(band=HFDL_BANDS["HFDL13"], radiod_id="rx888",
+                            config=_make_config())
+    pipeline._first_sample_logged = True
+    pipeline._proc = _FakeProc()
+    pipeline.set_keeper(rec)
+    x = np.zeros(10, dtype=np.complex64)
+    with caplog.at_level(logging.WARNING):
+        for _ in range(5):
+            pipeline._on_samples(x, SimpleNamespace(delivered_rtp_start=None))
+    hits = [r for r in caplog.records if "delivered_rtp_start" in r.getMessage()]
+    assert len(hits) == 1
+    assert rec.calls == []

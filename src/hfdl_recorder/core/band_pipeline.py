@@ -64,6 +64,7 @@ class BandPipeline:
         # after the dumphfdl write; it never blocks and never raises here.
         self._keeper = None
         self._keeper_failed = False
+        self._keeper_no_rtp_logged = False
         # The slot's CURRENT SSRC (MultiStream may re-key it on restore),
         # whether the stream is down, and when the last sample arrived.
         # BandPipeline.may_poll reads these so no status poll ever reaches
@@ -314,6 +315,14 @@ class BandPipeline:
         keeper = self._keeper
         if keeper is not None:
             rtp = getattr(quality, "delivered_rtp_start", None)
+            if rtp is None and quality is not None and not self._keeper_no_rtp_logged:
+                # ka9q-python older than 3.22.0 never sets it: the keeper
+                # would sit idle with no word in the journal.
+                self._keeper_no_rtp_logged = True
+                logger.warning(
+                    "%s: stream quality carries no delivered_rtp_start "
+                    "(ka9q-python < 3.22.0?); squitter windows are not saved "
+                    "until it does", self._band.name)
             if rtp is not None:
                 gaps = getattr(quality, "batch_gaps", None)
                 try:

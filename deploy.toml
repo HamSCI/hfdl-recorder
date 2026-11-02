@@ -18,6 +18,11 @@ edit = ["/usr/local/bin/hfdl-recorder", "config", "edit"]
 steps = [
     "python3 -m venv /opt/git/sigmond/hfdl-recorder/venv",
     "/opt/git/sigmond/hfdl-recorder/venv/bin/pip install --upgrade pip setuptools wheel",
+    # pip ignores [tool.uv.sources]: the two siblings go in first, from
+    # their checkouts (hamsci-dsp is not on PyPI), so the editable install
+    # below finds them satisfied.
+    "/opt/git/sigmond/hfdl-recorder/venv/bin/pip install -e /opt/git/sigmond/hamsci-dsp",
+    "/opt/git/sigmond/hfdl-recorder/venv/bin/pip install -e /opt/git/sigmond/ka9q-python",
     "/opt/git/sigmond/hfdl-recorder/venv/bin/pip install -e /opt/git/sigmond/hfdl-recorder",
     "/opt/git/sigmond/hfdl-recorder/scripts/build-dumphfdl.sh",
 ]
@@ -93,7 +98,12 @@ note = "provides radiod IQ multicast; HFDL fragment in config/fragments/hfdl.con
 
 [[deps.pypi]]
 name    = "ka9q-python"
-version = "3.8.0"
+version = ">=3.22.0"      # StreamQuality.delivered_rtp_start (the window keeper)
+venv    = "/opt/git/sigmond/hfdl-recorder/venv"
+
+[[deps.pypi]]
+name    = "hamsci-dsp"
+version = ">=0.8.0"       # sibling checkout /opt/git/sigmond/hamsci-dsp, not PyPI
 venv    = "/opt/git/sigmond/hfdl-recorder/venv"
 
 # ---------------------------------------------------------------------------
