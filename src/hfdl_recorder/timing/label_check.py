@@ -26,7 +26,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_OUT = Path("/var/lib/hfdl-recorder/label_corrections.toml")
+# The operator's diagnostic result.  Nothing reads it: the batch applies no
+# label correction (time_squitter's label_lag_s stays an analysis option).
+DEFAULT_OUT = Path("/var/lib/hfdl-recorder/label_check_results.toml")
 _INTERP = 8   # cross-correlation interpolation factor before the parabola
 
 

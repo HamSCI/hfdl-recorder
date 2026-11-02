@@ -151,8 +151,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub_lc.add_argument("--json", action="store_true",
                         help="print one JSON object per repeat")
     sub_lc.add_argument("--out", type=Path,
-                        default=Path("/var/lib/hfdl-recorder/label_corrections.toml"),
-                        help="write per-band median lag here")
+                        default=Path("/var/lib/hfdl-recorder/label_check_results.toml"),
+                        help="write the per-band median lag here, for the "
+                             "operator; nothing reads this file (the batch "
+                             "applies no correction)")
     _add_common(sub_lc)
 
     sub_sq = subparsers.add_parser(

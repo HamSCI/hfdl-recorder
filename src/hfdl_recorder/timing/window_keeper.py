@@ -48,6 +48,7 @@ from typing import Callable, Optional
 import numpy as np
 
 from hfdl_recorder.bands import HfdlBand
+from hfdl_recorder.timing.channel_status import ANCHOR_POLLS, LISTEN_S, POLL_TIMEOUT_S
 from hfdl_recorder.timing.frame_grid import FRAME_S, FRAMES_PER_DAY, SLOT_S, next_slot_starts
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,15 @@ SILENT_FRAMES = 3             # stop windowing a frequency unheard this long
 PLAN_LEAD_S = 2.0             # book a window this far ahead of its start
 PLAN_BACK_S = 1.5             # ... or this far behind, while the ring holds it
 PLAN_EVERY_S = 0.25           # how often feed() books
-RING_SLACK_S = 3.0            # ring = one window + this much writer latency
+# The writer thread takes anchors and saves windows in turn, so a finished
+# window can wait behind one anchor.  The worst anchor (passive listen, then
+# every poll timing out) is LISTEN_S + ANCHOR_POLLS * POLL_TIMEOUT_S = 3.5 s;
+# WRITER_SAVE_S covers the save ahead of it.  The ring holds one extended
+# window plus RING_SLACK_S of input: 5 s of complex64 is 11 MB on the widest
+# band (HFDL5, 277.2 kS/s), 3.2 MB at 80 kS/s.
+ANCHOR_WORST_S = LISTEN_S + ANCHOR_POLLS * POLL_TIMEOUT_S
+WRITER_SAVE_S = 1.5
+RING_SLACK_S = ANCHOR_WORST_S + WRITER_SAVE_S   # 5.0 s
 ANCHOR_RETRY_S = 10.0         # samples to wait after a failed anchor
 COUNTER_LABEL_TOL_S = 5.0     # counter vs status-pair label: beyond this, another run
 PRUNE_EVERY_S = 3600.0

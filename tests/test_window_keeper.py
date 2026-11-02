@@ -685,3 +685,15 @@ def test_anchor_failure_logged_once_per_streak(tmp_path, caplog):
     assert k.stats()["anchor_failures"] == 2
     assert k.stats()["anchors"] == 1
     assert sum("no anchor" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_ring_slack_covers_a_failing_anchor():
+    """The writer thread runs anchors and window saves in turn: a failing
+    least-late anchor (passive listen, then every poll timing out) must fit
+    in the ring's slack, or a finished window gets overwritten before the
+    writer reads it (dropped_overrun)."""
+    from hfdl_recorder.timing import channel_status as cs
+    from hfdl_recorder.timing import window_keeper as wk
+    worst = cs.LISTEN_S + cs.ANCHOR_POLLS * cs.POLL_TIMEOUT_S
+    assert wk.ANCHOR_WORST_S == worst
+    assert wk.RING_SLACK_S >= worst + wk.WRITER_SAVE_S

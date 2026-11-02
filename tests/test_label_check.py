@@ -96,7 +96,7 @@ def test_repeat_record_shape():
 
 
 def test_write_corrections_median_per_band(tmp_path):
-    out = tmp_path / "sub" / "label_corrections.toml"
+    out = tmp_path / "sub" / "label_check_results.toml"
     recs = [
         {"band": "HFDL13", "lag_us": 100.0},
         {"band": "HFDL13", "lag_us": 104.0},
@@ -130,7 +130,7 @@ def test_cli_parses_label_check():
     assert args.ref_freq_hz == 10_000_000.0
     assert args.band == "HFDL13"
     assert args.seconds == 30.0 and args.repeats == 5 and args.json
-    assert str(args.out) == "/var/lib/hfdl-recorder/label_corrections.toml"
+    assert str(args.out) == "/var/lib/hfdl-recorder/label_check_results.toml"
 # ---- _run_repeat against a fake radiod ----
 #
 # The fake models the radiod behaviour that matters for channel hygiene
