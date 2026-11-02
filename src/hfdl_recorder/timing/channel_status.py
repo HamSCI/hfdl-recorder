@@ -16,8 +16,14 @@ replies, off the sample path:
   runs late by its own amount; the earliest runs least late.
 
 Channel hygiene: on radiod, a command addressed to an unknown SSRC mints a
-channel with infinite lifetime.  Callers pass only the band's own live SSRC,
-the one ``BandPipeline.attach`` returned and whose samples are arriving.
+channel with infinite lifetime.  So ``gather_status`` listens first: a passive
+``listen_status`` for the one SSRC hears radiod's status broadcasts and any
+replies to other commands, and can mint nothing.  Only when that falls short
+does it poll, and only while ``gate(ssrc)`` holds.  The daemon's gate
+(``BandPipeline.may_poll``) admits the slot's CURRENT SSRC (MultiStream may
+re-key a slot on restore), while the stream is up and a sample arrived in the
+last 0.5 s.  Every reply must match the band's SSRC, output rate and centre
+frequency, or it is ignored.
 
 The monotonic clock only measures how long the map has gone without a reply.
 The host clock labels nothing.
@@ -40,6 +46,52 @@ HISTORY = 5                  # three of five is a strict majority; never widen
 MIN_AGREE = 3
 RUN_MISS_BLOCKS = 1000       # a restart resets INPUT_SAMPLES far past this
 ANCHOR_POLLS = 5
+LISTEN_S = 1.0               # passive listen before any poll
+POLL_TIMEOUT_S = 0.5
+FREQ_TOL_HZ = 1.0
+
+
+def reply_matches(reply, ssrc: int, output_samprate: int, freq_hz: float) -> bool:
+    """True only for a status reply from this band's own channel."""
+    if getattr(reply, "ssrc", None) != ssrc:
+        return False
+    if getattr(reply, "output_samprate", None) != output_samprate:
+        return False
+    f = getattr(reply, "frequency", None)
+    return f is not None and abs(float(f) - float(freq_hz)) <= FREQ_TOL_HZ
+
+
+def gather_status(control, ssrc: int, n: int, *, rate: int, freq_hz: float,
+                  gate: Callable[[int], bool], listen_s: float = LISTEN_S,
+                  poll_timeout: float = POLL_TIMEOUT_S) -> list:
+    """Up to ``n`` validated status replies for ``ssrc``.
+
+    Listens passively first.  Then polls, at most ``n`` times, each only
+    while ``gate(ssrc)`` holds; a closed gate stops the polling at once.
+    """
+    got: list = []
+
+    def heard(st):
+        if len(got) < n and reply_matches(st, ssrc, rate, freq_hz):
+            got.append(st)
+
+    listen = getattr(control, "listen_status", None)
+    if listen is not None and listen_s > 0:
+        try:
+            listen(heard, duration=listen_s, ssrcs={ssrc})
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("status listen for ssrc %d failed: %s", ssrc, exc)
+    for _ in range(n):
+        if len(got) >= n or not gate(ssrc):
+            break
+        try:
+            reply = control.poll_status(ssrc, min(poll_timeout, POLL_TIMEOUT_S))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("status poll of ssrc %d failed: %s", ssrc, exc)
+            continue
+        if reply_matches(reply, ssrc, rate, freq_hz):
+            got.append(reply)
+    return got
 
 
 def counter_poll_from_reply(reply, output_samprate: int) -> Optional[CounterPoll]:
@@ -63,10 +115,12 @@ def counter_poll_from_reply(reply, output_samprate: int) -> Optional[CounterPoll
 class ChannelCounterMap:
     """The counter map of one channel, kept from its own polls.  Thread-safe."""
 
-    def __init__(self, name: str, output_samprate: int,
+    def __init__(self, name: str, output_samprate: int, freq_hz: float,
                  mono_fn: Callable[[], float] = time.monotonic):
         self._name = name
         self._rate = int(output_samprate)
+        self._freq = float(freq_hz)
+        self._ssrc: Optional[int] = None
         self._mono = mono_fn
         # Half the signed-32 reach: a held map never aliases.
         self._stale_s = 0.5 * (2**31 / self._rate)
@@ -82,7 +136,25 @@ class ChannelCounterMap:
         with self._lock:
             return POLLS_AT_START if len(self._polls) < MIN_AGREE else 1
 
+    def bind(self, ssrc: int) -> None:
+        """Follow this SSRC.  A new one (a re-keyed slot) starts the map over."""
+        with self._lock:
+            if ssrc == self._ssrc:
+                return
+            self._ssrc = ssrc
+            self._polls.clear()
+            self._held = None
+            self._last_rtp = None
+            self._last_fresh = None
+
+    @property
+    def ssrc(self) -> Optional[int]:
+        return self._ssrc
+
     def add_reply(self, reply) -> None:
+        """Learn from one reply, if it comes from the bound channel."""
+        if self._ssrc is None or not reply_matches(reply, self._ssrc, self._rate, self._freq):
+            return
         poll = counter_poll_from_reply(reply, self._rate)
         if poll is not None:
             self.add(poll)
@@ -174,15 +246,15 @@ class _StatusPair:
 
 
 def least_late_anchor(control, ssrc: int, rtp: int, sample_rate: int, *,
+                      freq_hz: float, gate: Callable[[int], bool],
                       authority_reader=None, counter: Optional[ChannelCounterMap] = None,
-                      n: int = ANCHOR_POLLS, timeout: float = 1.0,
-                      rtp_to_utc=None):
-    """Anchor ``rtp`` through the least late of ``n`` status replies.
+                      n: int = ANCHOR_POLLS, listen_s: float = LISTEN_S,
+                      poll_timeout: float = POLL_TIMEOUT_S, rtp_to_utc=None):
+    """Anchor ``rtp`` through the least late of up to ``n`` status replies.
 
-    Returns the AnchorUTC that puts ``rtp`` earliest, or None when no reply
-    carried a status pair (never a host-clock fallback).  Each reply also
-    feeds ``counter``, so a re-anchor after a radiod restart relearns the
-    counter map at once.
+    Returns the AnchorUTC that puts ``rtp`` earliest, or None when no valid
+    reply carried a status pair (never a host-clock fallback).  Each reply
+    also feeds ``counter``, so a re-anchor relearns the counter map at once.
     """
     from hamsci_dsp.timing import acquire_anchor_utc
     if rtp_to_utc is None:
@@ -194,14 +266,11 @@ def least_late_anchor(control, ssrc: int, rtp: int, sample_rate: int, *,
             snapshot = authority_reader.read()
         except Exception as exc:  # noqa: BLE001
             logger.warning("authority read failed at anchor: %s", exc)
+    replies = gather_status(control, ssrc, n, rate=sample_rate, freq_hz=freq_hz,
+                            gate=gate, listen_s=listen_s, poll_timeout=poll_timeout)
     best = None
-    for _ in range(n):
-        try:
-            reply = control.poll_status(ssrc, timeout)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("anchor poll of ssrc %d failed: %s", ssrc, exc)
-            continue
-        if counter is not None:
+    for reply in replies:
+        if counter is not None and counter.ssrc == ssrc:
             counter.add_reply(reply)
         gps, snap_rtp = getattr(reply, "gps_time", None), getattr(reply, "rtp_timesnap", None)
         if not gps or snap_rtp is None:

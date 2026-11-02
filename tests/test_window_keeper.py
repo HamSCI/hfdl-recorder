@@ -48,7 +48,11 @@ class Stream:
     since float64 phase at 1.8e9 s jitters by milliradians).
     """
 
-    def __init__(self, utc0: float, rtp0: int, signal=None, block_s=0.02):
+    def __init__(self, utc0: float, rtp0: int, signal=None, block_s=0.02,
+                 drift=0.0):
+        # drift: the ADC's fractional rate error.  RTP counts samples; the
+        # true time per sample is 1 / (FS * (1 + drift)).
+        self.true_fs = FS * (1.0 + drift)
         self.utc = utc0
         self.rtp = rtp0 & 0xFFFFFFFF
         self.block = int(round(block_s * FS))
@@ -60,17 +64,25 @@ class Stream:
         self.utc += utc_gap_s
         self.segments.append((self.rtp, self.utc))
 
-    def run(self, keeper, seconds: float, on_block=None, pace=True):
+    def run(self, keeper, seconds: float, on_block=None, pace=True, gaps=None):
+        """gaps: {utc: n} passes gap_samples=n with the block holding utc."""
         n_blocks = int(round(seconds * FS / self.block))
         for _ in range(n_blocks):
             if on_block is not None:
                 on_block(self.utc)
-            t = (self.utc - FRAME0) + np.arange(self.block) / FS
+            t = (self.utc - FRAME0) + np.arange(self.block) / self.true_fs
             if self.signal is None:
                 x = np.zeros(self.block, dtype=np.complex64)
             else:
                 x = self.signal(t).astype(np.complex64)
-            keeper.feed(x, self.rtp)
+            n_gap = 0
+            for g_utc, g_n in (gaps or {}).items():
+                if self.utc <= g_utc < self.utc + self.block / self.true_fs:
+                    n_gap += g_n
+            if n_gap:
+                keeper.feed(x, self.rtp, gap_samples=n_gap)
+            else:
+                keeper.feed(x, self.rtp)
             if pace:
                 # Real time runs far slower than this loop.  Give the writer
                 # the time it would have had: to take the anchor, and to
@@ -78,14 +90,14 @@ class Stream:
                 keeper.wait_anchored(2.0)
                 keeper.flush()
             self.rtp = (self.rtp + self.block) & 0xFFFFFFFF
-            self.utc += self.block / FS
+            self.utc += self.block / self.true_fs
 
     def true_utc(self, rtp: int) -> float:
         """UTC of an RTP value in the newest segment that holds it."""
         for seg_rtp, seg_utc in reversed(self.segments):
             d = _rtp_diff(rtp, seg_rtp)
             if d >= 0:
-                return seg_utc + d / FS
+                return seg_utc + d / self.true_fs
         raise KeyError(rtp)
 
     def anchor_fn(self, rtp: int) -> AnchorUTC:
@@ -94,7 +106,7 @@ class Stream:
                          rtp_referenced=True)
 
 
-def spdu(gs_id, name, freq_khz, k, frame_index=0, status=None, utc_sync=True):
+def spdu(gs_id, name, freq_khz, k, frame_index=None, status=None, utc_sync=True):
     """A dumphfdl SPDU frame, shaped like the ND capture."""
     if status is None:
         status = [{"gs": {"id": gs_id, "name": name}, "utc_sync": utc_sync,
@@ -103,8 +115,8 @@ def spdu(gs_id, name, freq_khz, k, frame_index=0, status=None, utc_sync=True):
         "t": {"sec": 1, "usec": 0},
         "freq": int(freq_khz * 1000),
         "spdu": {"src": {"type": "Ground station", "id": gs_id, "name": name},
-                 "frame_index": frame_index, "frame_offset": k,
-                 "gs_status": status}}}
+                 "frame_offset": k, "gs_status": status,
+                 **({} if frame_index is None else {"frame_index": frame_index})}}}
 
 
 def _keeper(tmp_path, stream, **kw):
@@ -472,3 +484,180 @@ def test_feed_cost_is_small(tmp_path):
     finally:
         k.stop()
     assert per_call < 200e-6, f"{per_call * 1e6:.1f} us per feed"
+
+
+# -- fix round 1 --
+
+
+def _frame_of(utc):
+    return int(utc // 32) % 2700
+
+
+def test_reanchors_every_10_min_and_follows_drift(tmp_path):
+    """The ADC runs 50 ppm fast.  One anchor would let t0_utc drift 75 ms in
+    25 min; a fresh least-late anchor every 10 min holds it to 30 ms, and
+    windows 20 min apart carry different anchors."""
+    s = Stream(FRAME0 + 1.0, rtp0=11, block_s=0.5, drift=50e-6)
+    k = _keeper(tmp_path, s)
+    noted = set()
+
+    def on_block(utc):
+        f = int((utc - FRAME0) // 32)
+        if f not in noted:
+            noted.add(f)
+            k.note_squitter(spdu(4, "Riverhead, New York", 13312, 5,
+                                 frame_index=_frame_of(utc)))
+
+    try:
+        s.run(k, 25 * 60, on_block=on_block)
+        _settle(k)
+    finally:
+        k.stop()
+    wins = sorted((m for _, _, m in _windows(tmp_path)),
+                  key=lambda m: m["nominal_utc"])
+    assert len(wins) > 40
+    worst = max(abs(m["t0_utc"] - s.true_utc(m["rtp0"])) for m in wins)
+    assert worst < 600 * 50e-6 + 1e-3
+    first, last = wins[0], wins[-1]
+    assert last["nominal_utc"] - first["nominal_utc"] > 20 * 60
+    assert first["anchor_id"] != last["anchor_id"]
+    for m in wins:
+        assert 0 <= m["anchor_age_s"] <= 600 + 33
+        assert isinstance(m["anchor_rtp"], int)
+    assert k.stats()["anchors"] >= 3
+    assert k.stats()["reanchors"] == 0     # a refresh is not a discontinuity
+
+
+def test_frame_index_mismatch_counted_once_per_streak(tmp_path, caplog):
+    s = Stream(FRAME0 + 1.0, rtp0=11)
+    k = _keeper(tmp_path, s)
+    caplog.set_level(logging.WARNING, logger="hfdl_recorder.timing.window_keeper")
+    try:
+        s.run(k, 20.0)
+        good = _frame_of(s.utc)
+        k.note_squitter(spdu(4, "Riverhead, New York", 13312, 5, frame_index=good))
+        assert k.stats()["frame_mismatch"] == 0
+        for _ in range(2):
+            k.note_squitter(spdu(4, "Riverhead, New York", 13312, 5,
+                                 frame_index=(good + 40) % 2700))
+        assert k.stats()["frame_mismatch"] == 2
+        k.note_squitter(spdu(4, "Riverhead, New York", 13312, 5, frame_index=good))
+        k.note_squitter(spdu(4, "Riverhead, New York", 13312, 5,
+                             frame_index=(good + 40) % 2700))
+    finally:
+        k.stop()
+    assert k.stats()["frame_mismatch"] == 3
+    warnings = [r for r in caplog.records if "frame_index" in r.getMessage()]
+    assert len(warnings) == 2              # one per streak
+
+
+def test_status_entry_without_freqs_is_no_information(tmp_path):
+    s = Stream(FRAME0 + 1.0, rtp0=11)
+    k = _keeper(tmp_path, s)
+    try:
+        k.note_squitter(spdu(4, "Riverhead, New York", 13312, 5))
+        empty = [{"gs": {"id": 4, "name": "Riverhead, New York"},
+                  "utc_sync": True, "freqs": []},
+                 {"gs": {"id": 4, "name": "Riverhead, New York"},
+                  "utc_sync": True, "freqs": [{"id": 1}]}]
+        k.note_squitter(spdu(1, "San Francisco, California", 13303, 2,
+                             status=empty))
+        s.run(k, 16.0)
+        _settle(k)
+    finally:
+        k.stop()
+    assert any(m["gs_id"] == 4 for _, _, m in _windows(tmp_path))
+
+
+def test_disk_low_prunes_by_current_day_without_saving(tmp_path):
+    """Low disk from the start: nothing saves, yet retention still prunes."""
+    for name in ("20261001", "20261013"):
+        (tmp_path / name).mkdir()
+    s = Stream(FRAME0 + 1.0, rtp0=5)
+    k = _keeper(tmp_path, s, min_free_gb=5.0, retention_days=5,
+                free_bytes_fn=lambda path: 1 * 1024**3)
+    try:
+        k.note_squitter(spdu(4, "Riverhead, New York", 13312, 5))
+        s.run(k, 16.0)
+        _settle(k)
+    finally:
+        k.stop()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["20261013"]
+    assert k.stats()["dropped_disk"] == 1
+
+
+def test_disk_guard_has_hysteresis(tmp_path, caplog):
+    GB = 1024**3
+    seq = iter([1 * GB, 5.5 * GB, 5.5 * GB, 7 * GB])
+    last = {"v": 7 * GB}
+
+    def free(path):
+        last["v"] = next(seq, last["v"])
+        return last["v"]
+
+    s = Stream(FRAME0 + 1.0, rtp0=5)
+    k = _keeper(tmp_path, s, min_free_gb=5.0, free_bytes_fn=free)
+    caplog.set_level(logging.INFO, logger="hfdl_recorder.timing.window_keeper")
+    try:
+        k.note_squitter(spdu(4, "Riverhead, New York", 13312, 5))
+        k.note_squitter(spdu(4, "Riverhead, New York", 13315, 9, status=[]))
+        s.run(k, 70.0)
+        _settle(k)
+    finally:
+        k.stop()
+    st = k.stats()
+    # 5.5 GB lies above min_free_gb but below the resume level: still off.
+    assert st["dropped_disk"] == 3
+    assert st["saved"] >= 1
+    msgs = [r.getMessage() for r in caplog.records]
+    assert sum("free under" in m for m in msgs) == 1
+    assert sum("disk space back" in m for m in msgs) == 1
+
+
+def test_too_late_windows_counted(tmp_path):
+    s = Stream(FRAME0 + 5 * SLOT_S + 0.5, rtp0=5)    # starts inside the slot
+    k = _keeper(tmp_path, s)
+    try:
+        k.note_squitter(spdu(4, "Riverhead, New York", 13312, 5))
+        s.run(k, 5.0)
+        _settle(k)
+    finally:
+        k.stop()
+    assert k.stats()["skipped_late"] == 1
+    assert _windows(tmp_path) == []
+
+
+def test_gap_samples_recorded(tmp_path):
+    s = Stream(FRAME0 + 1.0, rtp0=5)
+    k = _keeper(tmp_path, s)
+    nominal = FRAME0 + 5 * SLOT_S
+    try:
+        k.note_squitter(spdu(4, "Riverhead, New York", 13312, 5))
+        s.run(k, 40.0, gaps={nominal + 1.0: 300})
+        k.note_squitter(spdu(4, "Riverhead, New York", 13312, 5))
+        s.run(k, 10.0)
+        _settle(k)
+    finally:
+        k.stop()
+    by_nom = {round(m["nominal_utc"]): m for _, _, m in _windows(tmp_path)}
+    assert by_nom[round(nominal)]["n_gap_samples"] == 300
+    assert by_nom[round(nominal + 32)]["n_gap_samples"] == 0
+
+
+def test_failed_save_leaves_no_tmp(tmp_path, monkeypatch):
+    import hfdl_recorder.timing.window_keeper as wk
+
+    def boom(*a, **kw):
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(wk.np, "savez", boom)
+    s = Stream(FRAME0 + 1.0, rtp0=5)
+    k = _keeper(tmp_path, s)
+    try:
+        k.note_squitter(spdu(4, "Riverhead, New York", 13312, 5))
+        s.run(k, 16.0)
+        _settle(k)
+    finally:
+        k.stop()
+    assert list(tmp_path.rglob("*.tmp")) == []
+    assert k.stats()["errors"] == 1 and k.stats()["saved"] == 0

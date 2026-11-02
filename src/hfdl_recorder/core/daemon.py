@@ -206,8 +206,10 @@ class HfdlRecorder:
     def _add_keeper(self, pipeline: BandPipeline, ssrc: int) -> None:
         """Build one WindowKeeper for this band and hand it to the pipeline.
 
-        Both labels come from the band channel's own status replies, polled
-        off the sample path, and only ever for this band's own SSRC.
+        Both labels come from the band channel's own status replies,
+        gathered off the sample path: a passive listen first, then polls only
+        to the slot's CURRENT SSRC and only while ``pipeline.may_poll`` holds.
+        ``ssrc`` names the channel at build time, for the log.
         """
         from pathlib import Path as _Path
 
@@ -223,13 +225,16 @@ class HfdlRecorder:
             self._authority_reader = AuthorityReader()
         reader = self._authority_reader
         band = pipeline.band
-        counter = ChannelCounterMap(band.name, band.samprate_hz)
+        counter = ChannelCounterMap(band.name, band.samprate_hz, band.center_hz)
+        counter.bind(ssrc)
         control = self._control
 
         def anchor_fn(rtp: int):
+            live = pipeline.current_ssrc
+            counter.bind(live)
             return least_late_anchor(
-                control, ssrc, rtp, band.samprate_hz,
-                authority_reader=reader, counter=counter)
+                control, live, rtp, band.samprate_hz, freq_hz=band.center_hz,
+                gate=pipeline.may_poll, authority_reader=reader, counter=counter)
 
         def tier_fn():
             snap = reader.read()
@@ -246,21 +251,17 @@ class HfdlRecorder:
             tier_fn=tier_fn,
         )
         pipeline.set_keeper(keeper)
-        self._keepers.append((keeper, ssrc, counter))
+        self._keepers.append((keeper, pipeline, counter))
         logger.info("%s: squitter windows on (ssrc=%d, dir=%s)",
                     band.name, ssrc, keeper.out_dir)
 
     def _note_squitter(self, frame: dict) -> None:
         # A squitter heard on one band announces frequencies on all of them.
-        for keeper, _ssrc, _counter in self._keepers:
+        for keeper, _pipeline, _counter in self._keepers:
             keeper.note_squitter(frame)
 
     TIMING_POLL_SEC = 60.0
     TIMING_STATS_SEC = 600.0
-    # Poll an SSRC only while its samples arrive: a poll to an SSRC radiod
-    # does not have (it restarted and has not re-created ours yet) would mint
-    # a channel with infinite lifetime.
-    TIMING_LIVE_SEC = 2.0
 
     def _start_timing(self) -> None:
         if not self._keepers:
@@ -284,27 +285,42 @@ class HfdlRecorder:
             target=self._timing_loop, daemon=True, name="squitter-timing")
         self._timing_thread.start()
 
+    def _refresh_counter_maps(self) -> None:
+        """One pass: each band's counter map hears its channel's status.
+
+        A passive listen first; polls only to the slot's current SSRC while
+        ``may_poll`` holds (see BandPipeline.may_poll for why).
+        """
+        from hfdl_recorder.timing.channel_status import gather_status
+
+        for _keeper, pipeline, counter in self._keepers:
+            ssrc = pipeline.current_ssrc
+            if ssrc is None:
+                continue
+            counter.bind(ssrc)
+            band = pipeline.band
+            for reply in gather_status(
+                    self._control, ssrc, counter.polls_wanted,
+                    rate=band.samprate_hz, freq_hz=band.center_hz,
+                    gate=pipeline.may_poll):
+                counter.add_reply(reply)
+
     def _timing_loop(self) -> None:
         """Keep each band's counter map fresh; log keeper stats.  Off the
-        sample path; one status poll per band per minute."""
+        sample path; at most one status exchange per band per minute."""
         next_poll = 0.0
         next_stats = time.monotonic() + self.TIMING_STATS_SEC
         while self._running:
             now = time.monotonic()
             if now >= next_poll:
                 next_poll = now + self.TIMING_POLL_SEC
-                for keeper, ssrc, counter in self._keepers:
-                    for _ in range(counter.polls_wanted):
-                        if time.monotonic() - keeper.last_feed_mono > self.TIMING_LIVE_SEC:
-                            break
-                        try:
-                            counter.add_reply(self._control.poll_status(ssrc, 1.0))
-                        except Exception as exc:
-                            logger.debug("counter map poll ssrc=%d failed: %s",
-                                         ssrc, exc)
+                try:
+                    self._refresh_counter_maps()
+                except Exception:
+                    logger.exception("counter map refresh failed")
             if now >= next_stats:
                 next_stats = now + self.TIMING_STATS_SEC
-                for keeper, _ssrc, _counter in self._keepers:
+                for keeper, _pipeline, _counter in self._keepers:
                     logger.info("%s", keeper.stats_line())
             time.sleep(1.0)
 
@@ -478,7 +494,7 @@ class HfdlRecorder:
                 pipeline.stop()
             except Exception:
                 logger.exception("Error stopping pipeline %s", pipeline.name)
-        for keeper, _ssrc, _counter in self._keepers:
+        for keeper, _pipeline, _counter in self._keepers:
             try:
                 keeper.stop()
             except Exception:

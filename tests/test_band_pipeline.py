@@ -155,8 +155,9 @@ class _RecordingKeeper:
         self.calls = []
         self.fail = fail
 
-    def feed(self, samples, rtp_start):
+    def feed(self, samples, rtp_start, gap_samples=0):
         self.calls.append((np.array(samples, copy=True), rtp_start))
+        self.gaps = getattr(self, "gaps", []) + [gap_samples]
         if self.fail:
             raise RuntimeError("keeper broke")
 
@@ -211,3 +212,83 @@ def test_keeper_skips_block_without_rtp():
     pipeline._on_samples(x, None)
     assert rec.calls == []
     assert len(pipeline._proc.stdin.getvalue()) == 2 * 10 * 8
+
+
+class _FakeMulti:
+    def __init__(self, ssrc):
+        self._slots = {ssrc: object()}
+
+    def add_channel(self, **kw):
+        return SimpleNamespace(ssrc=next(iter(self._slots)))
+
+
+def _attached(ssrc=0x10):
+    pipeline = BandPipeline(band=HFDL_BANDS["HFDL13"], radiod_id="rx888",
+                            config=_make_config())
+    pipeline._first_sample_logged = True
+    multi = _FakeMulti(ssrc)
+    pipeline.attach(multi)
+    return pipeline, multi
+
+
+def test_may_poll_only_the_live_current_ssrc():
+    pipeline, multi = _attached(0x10)
+    assert not pipeline.may_poll(0x10)                 # no sample yet
+    pipeline._on_samples(np.zeros(4, np.complex64), None)
+    assert pipeline.may_poll(0x10)
+    assert not pipeline.may_poll(0x11)
+    # The stream drops: no polls while it is down.
+    pipeline._on_stream_dropped("silence")
+    assert not pipeline.may_poll(0x10)
+    # MultiStream re-keys the slot to a new SSRC on restore.
+    multi._slots = {0x20: object()}
+    pipeline._on_stream_restored(SimpleNamespace(ssrc=0x20))
+    pipeline._on_samples(np.zeros(4, np.complex64), None)
+    assert pipeline.current_ssrc == 0x20
+    assert not pipeline.may_poll(0x10)
+    assert pipeline.may_poll(0x20)
+    # A slot that left MultiStream is never polled.
+    multi._slots = {}
+    assert not pipeline.may_poll(0x20)
+
+
+def test_may_poll_needs_a_sample_in_the_last_half_second(monkeypatch):
+    import hfdl_recorder.core.band_pipeline as bp
+    now = [1000.0]
+    monkeypatch.setattr(bp.time, "monotonic", lambda: now[0])
+    pipeline, _ = _attached(0x10)
+    pipeline._on_samples(np.zeros(4, np.complex64), None)
+    now[0] += 0.4
+    assert pipeline.may_poll(0x10)
+    now[0] += 0.2
+    assert not pipeline.may_poll(0x10)
+
+
+def test_keeper_errors_logged_once_per_streak(caplog):
+    import logging
+    caplog.set_level(logging.ERROR, logger="hfdl_recorder.core.band_pipeline")
+    rec = _RecordingKeeper(fail=True)
+    pipeline = BandPipeline(band=HFDL_BANDS["HFDL13"], radiod_id="rx888",
+                            config=_make_config())
+    pipeline._first_sample_logged = True
+    pipeline.set_keeper(rec)
+    q = SimpleNamespace(delivered_rtp_start=1, batch_gaps=[])
+    x = np.zeros(4, np.complex64)
+    for fail in (True, True, False, True, True):
+        rec.fail = fail
+        pipeline._on_samples(x, q)
+    assert sum("window keeper failed" in r.getMessage() for r in caplog.records) == 2
+
+
+def test_gap_samples_reach_keeper():
+    rec = _RecordingKeeper()
+    pipeline = BandPipeline(band=HFDL_BANDS["HFDL13"], radiod_id="rx888",
+                            config=_make_config())
+    pipeline._first_sample_logged = True
+    pipeline.set_keeper(rec)
+    gaps = [SimpleNamespace(duration_samples=100), SimpleNamespace(duration_samples=20)]
+    pipeline._on_samples(np.zeros(4, np.complex64),
+                         SimpleNamespace(delivered_rtp_start=1, batch_gaps=gaps))
+    pipeline._on_samples(np.zeros(4, np.complex64),
+                         SimpleNamespace(delivered_rtp_start=5, batch_gaps=[]))
+    assert rec.gaps == [120, 0]

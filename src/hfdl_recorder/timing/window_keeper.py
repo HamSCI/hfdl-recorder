@@ -67,6 +67,9 @@ RING_SLACK_S = 3.0            # ring = one window + this much writer latency
 ANCHOR_RETRY_S = 10.0         # samples to wait after a failed anchor
 COUNTER_LABEL_TOL_S = 5.0     # counter vs status-pair label: beyond this, another run
 PRUNE_EVERY_S = 3600.0
+REANCHOR_S = 600.0            # take a fresh least-late anchor this often
+DISK_RESUME_GB = 1.0          # resume saving at min_free_gb + this (hysteresis)
+GAP_HISTORY = 64              # blocks with zero-fill remembered for the meta
 WRITER_NICE = 10              # added to the process's niceness, writer thread only
 
 # GPS epoch minus Unix epoch, and GPS minus UTC.  Only the 5 s run check
@@ -107,6 +110,8 @@ class _Target:
 @dataclass(frozen=True)
 class _Anchor:
     gen: int
+    id: int                   # counts every anchor this keeper took
+    rtp: int                  # the anchored RTP
     abs_: int                 # ring sample count of the anchored RTP
     utc: float
     source: str
@@ -184,7 +189,11 @@ class WindowKeeper:
         self._gen_rtp = 0
         self._next_plan_abs = 0
         self._next_anchor_abs = 0
-        self._anchor_asked: Optional[int] = None
+        self._anchor_pending = False       # an anchor request sits with the writer
+        self._anchor_seq = 0
+        # Blocks that carried zero-fill: ((abs_start, n, gap_samples), ...),
+        # replaced whole so the writer reads it without a lock.
+        self._gaps: tuple = ()
         self._planned: list[_Job] = []
         self._booked: dict[tuple, int] = {}
 
@@ -200,13 +209,15 @@ class WindowKeeper:
         self._thread: Optional[threading.Thread] = None
         self._disk_low = False
         self._last_prune: Optional[float] = None
-        self._newest_day: Optional[str] = None
+        self._current_day: Optional[str] = None   # from the latest window's nominal UTC
+        self._frame_bad = False
 
         self._stats = {
             "saved": 0, "dropped_queue": 0, "dropped_disk": 0,
             "dropped_overrun": 0, "reanchors": 0, "anchors": 0,
             "anchor_failures": 0, "no_counter_map": 0,
             "counter_map_refused": 0, "errors": 0,
+            "skipped_late": 0, "frame_mismatch": 0,
         }
 
     @property
@@ -279,8 +290,13 @@ class WindowKeeper:
             if gs.get("name") not in self._chosen:
                 continue
             freqs = frozenset(int(round(float(f["freq"])))
-                              for f in entry.get("freqs") or [] if "freq" in f)
+                              for f in entry.get("freqs") or []
+                              if isinstance(f, dict) and f.get("freq") is not None)
+            if not freqs:
+                continue                  # no resolvable list: no information
             announced[int(gs["id"])] = (freqs, entry.get("utc_sync"))
+
+        self._check_frame_index(spdu.get("frame_index"), heard)
 
         src = spdu.get("src") or {}
         new: Optional[_Target] = None
@@ -311,6 +327,34 @@ class WindowKeeper:
                 targets[(new.gs_id, new.freq_khz)] = new
             self._targets = targets
 
+    def _check_frame_index(self, frame_index, heard_abs: int) -> None:
+        """The squitter names its frame; the anchor names the frame now.
+
+        A decode lands within the frame it was sent in or the next one, so
+        any other difference means the anchor (or the decode) is wrong by a
+        frame or more.  Counted always; logged once per streak.
+        """
+        a = self._anchor
+        if frame_index is None or a is None or a.gen != self._gen:
+            return
+        head_utc = a.utc + (heard_abs - a.abs_) / self._fs
+        ours = math.floor(head_utc / FRAME_S) % FRAMES_PER_DAY
+        lag = (ours - int(frame_index)) % FRAMES_PER_DAY
+        if lag <= 1:
+            if self._frame_bad:
+                self._frame_bad = False
+                logger.info("%s: squitter frame_index agrees with the anchor again",
+                            self._band.name)
+            return
+        self._stats["frame_mismatch"] += 1
+        if not self._frame_bad:
+            self._frame_bad = True
+            logger.warning(
+                "%s: squitter frame_index %d, but the anchor puts this frame at "
+                "%d; the anchor or the decode is off by a frame or more "
+                "(further mismatches counted, not logged)",
+                self._band.name, int(frame_index), ours)
+
     def _in_band(self, freq_khz: int) -> bool:
         f_mix = freq_khz * 1000 - self._band.center_hz
         return abs(f_mix) + EDGE_HZ <= self._fs / 2 - FILTER_GUARD_HZ
@@ -322,8 +366,12 @@ class WindowKeeper:
 
     # -- samples (MultiStream thread) --
 
-    def feed(self, samples: np.ndarray, rtp_start: int) -> None:
-        """Copy one block into the ring and book finished windows.  Never blocks."""
+    def feed(self, samples: np.ndarray, rtp_start: int, gap_samples: int = 0) -> None:
+        """Copy one block into the ring and book finished windows.  Never blocks.
+
+        ``gap_samples``: zero-fill MultiStream put in this block (its
+        quality.batch_gaps); windows that overlap the block record it.
+        """
         x = np.asarray(samples)
         if x.dtype != np.complex64:
             if np.iscomplexobj(x):
@@ -348,6 +396,9 @@ class WindowKeeper:
         self._ring[start:start + first] = src[:first]
         if first < len(src):
             self._ring[:len(src) - first] = src[first:]
+        if gap_samples:
+            self._gaps = self._gaps[-(GAP_HISTORY - 1):] + (
+                (self._head_abs, n, int(gap_samples)),)
         self._head_abs += n
         self._expect_rtp = (rtp_start + n) & 0xFFFFFFFF
 
@@ -355,6 +406,8 @@ class WindowKeeper:
         if anchor is None or anchor.gen != self._gen:
             self._ask_anchor(rtp_start, self._head_abs - n)
             return
+        if self._head_abs - anchor.abs_ >= REANCHOR_S * self._fs:
+            self._ask_anchor(rtp_start, self._head_abs - n)   # a periodic refresh
         if self._head_abs >= self._next_plan_abs:
             self._next_plan_abs = self._head_abs + int(PLAN_EVERY_S * self._fs)
             self._plan(anchor)
@@ -373,16 +426,16 @@ class WindowKeeper:
         self._planned = []
         self._booked = {}
         self._anchored_evt.clear()
-        self._anchor_asked = None
+        self._anchor_pending = False
         self._next_anchor_abs = self._head_abs
         self._next_plan_abs = self._head_abs
 
     def _ask_anchor(self, rtp: int, abs_: int) -> None:
-        if self._anchor_asked == self._gen or self._head_abs < self._next_anchor_abs:
+        if self._anchor_pending or self._head_abs < self._next_anchor_abs:
             return
         try:
             self._q.put_nowait(("anchor", self._gen, abs_, rtp))
-            self._anchor_asked = self._gen
+            self._anchor_pending = True
         except queue.Full:
             pass                          # try again on a later block
 
@@ -402,6 +455,7 @@ class WindowKeeper:
                 ext = s0 - self._margin_in
                 if ext < oldest:
                     self._booked[key] = s0          # too late; never retry it
+                    self._stats["skipped_late"] += 1
                     continue
                 self._booked[key] = s0
                 self._planned.append(_Job(
@@ -455,27 +509,44 @@ class WindowKeeper:
 
     def _do_anchor(self, gen: int, abs_: int, rtp: int) -> None:
         try:
+            self._take_anchor(gen, abs_, rtp)
+        finally:
+            self._anchor_pending = False
+
+    def _take_anchor(self, gen: int, abs_: int, rtp: int) -> None:
+        try:
             a = self._anchor_fn(rtp)
         except Exception as exc:  # noqa: BLE001
             logger.warning("%s: anchor failed: %s", self._band.name, exc)
             a = None
         if a is None or not getattr(a, "rtp_referenced", True):
-            # No host-clock labels: wait and ask again.
+            # No host-clock labels: wait and ask again (a refresh keeps the
+            # anchor it has meanwhile).
             self._stats["anchor_failures"] += 1
             self._next_anchor_abs = abs_ + int(ANCHOR_RETRY_S * self._fs)
-            self._anchor_asked = None
             return
         if gen != self._gen:
             return                          # another discontinuity since asking
+        old = self._anchor
+        self._anchor_seq += 1
         snap = getattr(a, "snapshot", None)
         self._anchor = _Anchor(
-            gen=gen, abs_=abs_, utc=float(a.utc), source=str(a.source),
+            gen=gen, id=self._anchor_seq, rtp=int(rtp) & 0xFFFFFFFF, abs_=abs_,
+            utc=float(a.utc), source=str(a.source),
             offset_ns=getattr(a, "offset_ns", None),
             t_level_active=getattr(snap, "t_level_active", None))
         self._stats["anchors"] += 1
         self._anchored_evt.set()
-        logger.info("%s: squitter windows anchored rtp=%d utc=%.6f (%s)",
-                    self._band.name, rtp, a.utc, a.source)
+        if old is not None and old.gen == gen:
+            # The step between the extrapolated old anchor and the new one:
+            # ADC rate error over the interval plus the two anchors' lateness.
+            step_ms = (a.utc - (old.utc + (abs_ - old.abs_) / self._fs)) * 1e3
+            logger.info("%s: squitter windows re-anchored rtp=%d utc=%.6f (%s), "
+                        "step %+.3f ms after %.0f s", self._band.name, rtp, a.utc,
+                        a.source, step_ms, (abs_ - old.abs_) / self._fs)
+        else:
+            logger.info("%s: squitter windows anchored rtp=%d utc=%.6f (%s)",
+                        self._band.name, rtp, a.utc, a.source)
 
     def _read_ring(self, a: int, n: int) -> Optional[np.ndarray]:
         idx = a % self._ring_len
@@ -492,24 +563,30 @@ class WindowKeeper:
     def _save_window(self, job: _Job) -> None:
         if job.gen != self._gen:
             return                          # a discontinuity came after booking
+        self._current_day = datetime.fromtimestamp(
+            job.nominal_utc, tz=timezone.utc).strftime("%Y%m%d")
         try:
             free = self._free_bytes(self._out_dir)
         except OSError:
             free = 0
-        if free < self._min_free:
+        # Hysteresis: stop below min_free_gb, resume only DISK_RESUME_GB above.
+        limit = self._min_free + (DISK_RESUME_GB * 1024**3 if self._disk_low else 0)
+        if free < limit:
             self._stats["dropped_disk"] += 1
             if not self._disk_low:
                 self._disk_low = True
                 logger.warning(
                     "%s: only %.1f GB free under %s (min %.1f GB); saving no "
-                    "squitter windows until space returns",
+                    "squitter windows until %.1f GB are free",
                     self._band.name, free / 1024**3, self._out_dir,
-                    self._min_free / 1024**3)
+                    self._min_free / 1024**3,
+                    self._min_free / 1024**3 + DISK_RESUME_GB)
+                self._maybe_prune(force=True)
             return
         if self._disk_low:
             self._disk_low = False
-            logger.info("%s: disk space back; squitter windows resume",
-                        self._band.name)
+            logger.info("%s: disk space back (%.1f GB free); squitter windows resume",
+                        self._band.name, free / 1024**3)
 
         raw = self._read_ring(job.ext_abs, self._n_in_ext)
         if raw is None or job.gen != self._gen:
@@ -519,17 +596,27 @@ class WindowKeeper:
         x = self._narrow(raw, job.target.freq_khz)
 
         meta = self._meta(job, n_bad)
+        meta["n_gap_samples"] = sum(
+            g for start, n, g in self._gaps
+            if start < job.end_abs and start + n > job.ext_abs)
         day = datetime.fromtimestamp(job.nominal_utc, tz=timezone.utc).strftime("%Y%m%d")
         folder = self._out_dir / day
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{job.target.gs_id}-{job.target.freq_khz}-{job.frame_index}.npz"
         tmp = path.with_name(path.name + ".tmp")
-        with open(tmp, "wb") as fh:
-            np.savez(fh, x=x, meta=np.str_(json.dumps(meta)))
-        os.replace(tmp, path)
+        try:
+            with open(tmp, "wb") as fh:
+                np.savez(fh, x=x, meta=np.str_(json.dumps(meta)))
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
         self._stats["saved"] += 1
-        if self._newest_day is None or day > self._newest_day:
-            self._newest_day = day
 
     def _make_taper(self) -> np.ndarray:
         f = np.fft.fftfreq(self._n_out_ext, 1.0 / OUT_FS)
@@ -582,6 +669,9 @@ class WindowKeeper:
             "band_fs": self._fs,
             "band_center_hz": self._band.center_hz,
             "anchor_source": a.source,
+            "anchor_id": a.id,
+            "anchor_rtp": a.rtp,
+            "anchor_age_s": (job.s0_abs - a.abs_) / self._fs,
             "offset_ns": a.offset_ns,
             "t_level_active": tier,
             "utc_sync": t.utc_sync,
@@ -619,14 +709,17 @@ class WindowKeeper:
                     input_epoch_gps_s=cmap.input_epoch_gps_s)
         return meta
 
-    def _maybe_prune(self) -> None:
+    def _maybe_prune(self, force: bool = False) -> None:
+        """Remove day folders older than retention_days before the current
+        day (the latest window's nominal UTC, saved or not)."""
         now = time.monotonic()
-        if self._last_prune is not None and now - self._last_prune < PRUNE_EVERY_S:
+        if not force and self._last_prune is not None \
+                and now - self._last_prune < PRUNE_EVERY_S:
             return
-        if self._newest_day is None:
+        if self._current_day is None:
             return
         self._last_prune = now
-        newest = datetime.strptime(self._newest_day, "%Y%m%d")
+        newest = datetime.strptime(self._current_day, "%Y%m%d")
         cutoff = (newest - timedelta(days=self._retention_days)).strftime("%Y%m%d")
         try:
             entries = list(self._out_dir.iterdir())

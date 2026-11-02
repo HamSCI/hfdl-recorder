@@ -64,6 +64,13 @@ class BandPipeline:
         # after the dumphfdl write; it never blocks and never raises here.
         self._keeper = None
         self._keeper_failed = False
+        # The slot's CURRENT SSRC (MultiStream may re-key it on restore),
+        # whether the stream is down, and when the last sample arrived.
+        # BandPipeline.may_poll reads these so no status poll ever reaches
+        # an SSRC radiod does not have (a poll would mint a channel).
+        self._ssrc: int | None = None
+        self._dropped = False
+        self._last_sample_mono = 0.0
 
     @property
     def name(self) -> str:
@@ -95,7 +102,26 @@ class BandPipeline:
             on_stream_restored=self._on_stream_restored,
             lifetime=lifetime,
         )
+        self._ssrc = info.ssrc
         return info.ssrc
+
+    # A status poll to this SSRC is safe only while all of these hold.
+    POLL_SAMPLE_AGE_SEC = 0.5
+
+    @property
+    def current_ssrc(self) -> int | None:
+        return self._ssrc
+
+    def may_poll(self, ssrc: int) -> bool:
+        """True when a command to ``ssrc`` cannot mint a channel on radiod:
+        it is the slot's current SSRC, MultiStream still holds that slot,
+        the stream is up, and a sample arrived in the last 0.5 s."""
+        if ssrc is None or ssrc != self._ssrc or self._dropped:
+            return False
+        slots = getattr(self._multi, "_slots", None)
+        if slots is not None and ssrc not in slots:
+            return False
+        return time.monotonic() - self._last_sample_mono <= self.POLL_SAMPLE_AGE_SEC
 
     def start(self) -> None:
         """Open the per-band log and launch the supervisor thread."""
@@ -258,19 +284,28 @@ class BandPipeline:
             self._first_sample_logged = True
 
         self._write_dumphfdl(samples)
+        self._last_sample_mono = time.monotonic()
 
         keeper = self._keeper
         if keeper is not None:
             rtp = getattr(quality, "delivered_rtp_start", None)
             if rtp is not None:
+                gaps = getattr(quality, "batch_gaps", None)
                 try:
-                    keeper.feed(samples, rtp)
+                    if gaps:
+                        keeper.feed(samples, rtp, gap_samples=sum(
+                            int(g.duration_samples) for g in gaps))
+                    else:
+                        keeper.feed(samples, rtp)
+                    if self._keeper_failed:
+                        self._keeper_failed = False
+                        logger.info("%s: window keeper recovered", self._band.name)
                 except Exception:  # noqa: BLE001 - decoding must not notice
                     if not self._keeper_failed:
                         self._keeper_failed = True
                         logger.exception(
                             "%s: window keeper failed; dumphfdl unaffected "
-                            "(further failures silent)", self._band.name)
+                            "(silent until it recovers)", self._band.name)
 
     def _write_dumphfdl(self, samples) -> None:
         with self._proc_lock:
@@ -291,17 +326,27 @@ class BandPipeline:
         # just waits on stdin), and we hold no per-channel ring/closure to
         # orphan.  Recovery is owned by dumphfdl + the supervisor; the slot
         # resumes on restore.
+        self._dropped = True
         logger.warning("%s: ka9q-radio stream dropped", self._band.name)
 
-    def _on_stream_restored(self, *_args, **_kwargs) -> None:
-        # Intentional no-op: channels are provisioned ONCE at startup and the
-        # SSRC is stable across a radiod restart (derived from freq/preset),
-        # so the existing MultiStream slot simply resumes — no re-subscribe.
+    def _on_stream_restored(self, channel_info=None, *_args, **_kwargs) -> None:
+        # No re-subscribe: channels are provisioned ONCE at startup and the
+        # existing MultiStream slot resumes.  The SSRC usually stays the same
+        # across a radiod restart, but MultiStream._attempt_restore re-keys
+        # the slot itself when ensure_channel returns a new one.
         # MAINTAINER NOTE: if a mid-flight reprovision path is ever added (a
         # new SSRC per re-ensure_channel), it MUST prune the superseded slot
         # — multi.prune_frequency(freq, keep_ssrc=...) — exactly as
         # wspr-recorder/receiver_manager.py does, or the old slot leaks and
         # the band can go silent on a changed SSRC.
+        # MultiStream._attempt_restore re-keys the slot when radiod hands
+        # back a new SSRC; follow it, so status polls go to the live one.
+        new_ssrc = getattr(channel_info, "ssrc", None)
+        if new_ssrc is not None and new_ssrc != self._ssrc:
+            logger.warning("%s: stream restored on a new SSRC %s (was %s)",
+                           self._band.name, new_ssrc, self._ssrc)
+            self._ssrc = new_ssrc
+        self._dropped = False
         logger.info("%s: ka9q-radio stream restored", self._band.name)
 
 
