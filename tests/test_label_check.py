@@ -85,9 +85,10 @@ def test_whole_second_label_offset_with_partial_overlap():
 def test_repeat_record_shape():
     rec = build_repeat_record(
         band="HFDL13", probe_fs=80000, ref_fs=12000, lag_s=1.5e-4,
-        corr=0.97, anchor_source="rtp_to_utc+authority", t_level_active="T3")
+        corr=0.97, anchor_source="rtp_to_utc+authority",
+        ref_source="rtp_to_utc", t_level_active="T3")
     assert list(rec) == ["band", "probe_fs", "ref_fs", "lag_us", "corr",
-                         "anchor_source", "t_level_active"]
+                         "anchor_source", "ref_source", "t_level_active"]
     assert rec["lag_us"] == pytest.approx(150.0)
     json.dumps(rec)
 
@@ -128,3 +129,110 @@ def test_cli_parses_label_check():
     assert args.band == "HFDL13"
     assert args.seconds == 30.0 and args.repeats == 5 and args.json
     assert str(args.out) == "/var/lib/hfdl-recorder/label_corrections.toml"
+
+
+# ---- _run_repeat with fakes ----
+
+from types import SimpleNamespace
+
+from hfdl_recorder.bands import HFDL_BANDS
+from hfdl_recorder.timing import label_check as lc
+
+
+class _FakeControl:
+    def __init__(self):
+        self.calls = []
+
+    def remove_channel(self, ssrc):
+        self.calls.append(("remove_channel", ssrc))
+
+    def poll_channel(self, ssrc, **kw):
+        self.calls.append(("poll_channel", ssrc))
+        return None
+
+    def __getattr__(self, name):          # any other call is recorded loudly
+        def rec(*a, **kw):
+            self.calls.append((name, a, kw))
+        return rec
+
+
+class _FakeStream:
+    """Delivers a full capture synchronously on start()."""
+    def __init__(self, channel, on_samples):
+        self.on_samples = on_samples
+        self.fs = channel.sample_rate
+
+    def start(self):
+        n = int(self.on_samples.n_target)
+        self.on_samples(np.ones(n, dtype=np.complex64),
+                        SimpleNamespace(delivered_rtp_start=1))
+
+    def stop(self):
+        pass
+
+
+def _fake_multi(probe_ssrc):
+    class FakeMulti:
+        def __init__(self, control):
+            self.control = control
+
+        def add_channel(self, **kw):
+            self.cb = kw["on_samples"]
+            return SimpleNamespace(ssrc=probe_ssrc)
+
+        def start(self):
+            self.cb(np.ones(self.cb.n_target, dtype=np.complex64),
+                    SimpleNamespace(delivered_rtp_start=1))
+
+        def stop(self):
+            pass
+    return FakeMulti
+
+
+def _anchor(source, rtp=True):
+    return SimpleNamespace(utc=1000.0, source=source, rtp_referenced=rtp,
+                           snapshot=SimpleNamespace(t_level_active="T3"))
+
+
+def _run(control, probe_ssrc, label_fn, monkeypatch):
+    monkeypatch.setattr(lc, "_wait_gone", lambda *a, **k: None)
+    ref = SimpleNamespace(ssrc=111, frequency=10e6, sample_rate=12000,
+                          multicast_address="239.1.1.1")
+
+    def fake_stream(channel, on_samples):
+        return _FakeStream(channel, on_samples)
+    return lc._run_repeat(
+        0, control=control, ref=ref, band=HFDL_BANDS["HFDL13"], seconds=0.01,
+        reader=None, label_fn=label_fn, ref_stream_cls=fake_stream,
+        multi_cls=_fake_multi(probe_ssrc))
+
+
+def test_reference_path_never_creates_modifies_or_removes(monkeypatch):
+    control = _FakeControl()
+    monkeypatch.setattr(lc, "labelled_lag_seconds", lambda *a: (1e-4, 0.9))
+    rec = _run(control, 222, lambda *a: _anchor("rtp_to_utc"), monkeypatch)
+    assert rec["ref_source"] == "rtp_to_utc"
+    assert rec["lag_us"] == pytest.approx(100.0)
+    # Only the probe SSRC is ever touched, and only by removal.
+    assert control.calls == [("remove_channel", 222)]
+
+
+def test_wallclock_anchor_drops_the_repeat(monkeypatch, capsys):
+    monkeypatch.setattr(lc, "labelled_lag_seconds", lambda *a: (1e-4, 0.9))
+    for bad_ref, bad_probe in (("wallclock_fallback", "rtp_to_utc"),
+                               ("rtp_to_utc", "authority_on_wallclock")):
+        anchors = iter([_anchor(bad_ref, rtp=bad_ref.startswith("rtp")),
+                        _anchor(bad_probe, rtp=bad_probe.startswith("rtp"))])
+        rec = _run(_FakeControl(), 222, lambda *a: next(anchors), monkeypatch)
+        assert rec is None
+        assert "DROPPED" in capsys.readouterr().err
+
+
+def test_equal_ssrc_refuses_removal(monkeypatch):
+    control = _FakeControl()
+    with pytest.raises(SystemExit):
+        _run(control, 111, lambda *a: _anchor("rtp_to_utc"), monkeypatch)
+    assert not [c for c in control.calls if c[0] == "remove_channel"]
+    with pytest.raises(SystemExit):
+        lc._remove_probe(control, 111, 111)
+    assert not [c for c in control.calls if c[0] == "remove_channel"]

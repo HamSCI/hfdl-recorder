@@ -113,7 +113,7 @@ def labelled_lag_seconds(ref: np.ndarray, ref_fs: int, ref_t0_utc: float,
 
 def build_repeat_record(*, band: str, probe_fs: int, ref_fs: int, lag_s: float,
                         corr: float, anchor_source: str,
-                        t_level_active) -> dict:
+                        ref_source: str, t_level_active) -> dict:
     """One JSON-able result per repeat (the `--json` output shape)."""
     return {
         "band": band,
@@ -122,6 +122,7 @@ def build_repeat_record(*, band: str, probe_fs: int, ref_fs: int, lag_s: float,
         "lag_us": lag_s * 1e6,
         "corr": corr,
         "anchor_source": anchor_source,
+        "ref_source": ref_source,
         "t_level_active": t_level_active,
     }
 
@@ -162,24 +163,6 @@ def write_corrections(path: Path, records: list[dict]) -> None:
 
 
 # ---- radiod-facing code: thin, exercised only against a live radiod ----
-
-class _PinnedDestination:
-    """RadiodControl proxy that pins ensure_channel to an existing group.
-
-    The SSRC hashes the destination, so subscribing to hf-timestd's channel
-    needs hf-timestd's multicast address, not our per-client one.
-    """
-
-    def __init__(self, control, destination: str):
-        self._control = control
-        self._destination = destination
-
-    def ensure_channel(self, **kw):
-        return self._control.ensure_channel(destination=self._destination, **kw)
-
-    def __getattr__(self, name):
-        return getattr(self._control, name)
-
 
 def _find_reference(status: str, freq_hz: float, ref_ssrc: int | None):
     from ka9q import discover_channels
@@ -243,16 +226,90 @@ def _wait_gone(control, ssrc: int, timeout: float = 90.0) -> None:
     logger.warning("probe SSRC %d still answering after %.0f s", ssrc, timeout)
 
 
+def _rtp_labelled(anchor) -> bool:
+    """True when the anchor came from RTP timing, not the host wall clock."""
+    return bool(anchor.rtp_referenced) and anchor.source.startswith("rtp_to_utc")
+
+
+def _remove_probe(control, probe_ssrc: int, ref_ssrc: int) -> None:
+    """Remove our probe channel; never, under any mix-up, hf-timestd's."""
+    if probe_ssrc == ref_ssrc:
+        raise SystemExit(
+            f"label-check: probe SSRC {probe_ssrc} equals the reference "
+            f"SSRC; refusing to remove hf-timestd's channel")
+    control.remove_channel(probe_ssrc)
+
+
+def _run_repeat(i, *, control, ref, band, seconds, reader, label_fn=_label,
+                ref_stream_cls=None, multi_cls=None):
+    """One capture + measurement.  Returns a record dict, or None on failure.
+
+    The reference path is subscribe-only: a RadiodStream built straight from
+    the discovered ChannelInfo.  It never goes through ensure_channel, so it
+    cannot create, modify or remove a channel on hf-timestd's group.
+    """
+    if ref_stream_cls is None:
+        from ka9q import RadiodStream as ref_stream_cls
+    if multi_cls is None:
+        from ka9q import MultiStream as multi_cls
+    from hfdl_recorder.core.radiod import HFDL_ENCODING, HFDL_PRESET
+
+    ref_fs = int(ref.sample_rate)
+    ref_c = _Collector(int(seconds * ref_fs))
+    probe_c = _Collector(int(seconds * band.samprate_hz))
+    ref_stream = ref_stream_cls(channel=ref, on_samples=ref_c)
+    probe_ms = multi_cls(control=control)
+    probe_info = probe_ms.add_channel(
+        frequency_hz=float(ref.frequency), preset=HFDL_PRESET,
+        sample_rate=band.samprate_hz, encoding=HFDL_ENCODING,
+        on_samples=probe_c)
+    if probe_info.ssrc == ref.ssrc:
+        raise SystemExit(
+            f"label-check: probe SSRC {probe_info.ssrc} equals the reference "
+            f"SSRC; refusing to continue")
+    ok = False
+    try:
+        probe_ms.start()
+        ref_stream.start()
+        limit = seconds + 30
+        ok = probe_c.done.wait(limit) and ref_c.done.wait(limit)
+    finally:
+        ref_stream.stop()
+        probe_ms.stop()
+        _remove_probe(control, probe_info.ssrc, ref.ssrc)
+    try:
+        if not ok:
+            print(f"label-check: repeat {i}: capture timed out",
+                  file=sys.stderr)
+            return None
+        a_ref = label_fn(ref_c, ref, ref_fs, reader)
+        a_probe = label_fn(probe_c, probe_info, band.samprate_hz, reader)
+        if not (_rtp_labelled(a_ref) and _rtp_labelled(a_probe)):
+            print(f"label-check: repeat {i}: DROPPED, label not RTP-derived "
+                  f"(ref {a_ref.source}, probe {a_probe.source}); a "
+                  f"wall-clock lag is meaningless", file=sys.stderr)
+            return None
+        lag, corr = labelled_lag_seconds(
+            ref_c.samples(), ref_fs, a_ref.utc,
+            probe_c.samples(), band.samprate_hz, a_probe.utc)
+        return build_repeat_record(
+            band=band.name, probe_fs=band.samprate_hz, ref_fs=ref_fs,
+            lag_s=lag, corr=corr, anchor_source=a_probe.source,
+            ref_source=a_ref.source,
+            t_level_active=getattr(a_probe.snapshot, "t_level_active", None))
+    finally:
+        _wait_gone(control, probe_info.ssrc)
+
+
 def run_label_check(args) -> int:
     from hamsci_dsp.timing import AuthorityReader
-    from ka9q import MultiStream, RadiodControl
+    from ka9q import RadiodControl
 
     from hfdl_recorder.bands import HFDL_BANDS
     from hfdl_recorder.config import (
         load_config, resolve_config_path, resolve_radiod_block,
         resolve_radiod_status,
     )
-    from hfdl_recorder.core.radiod import HFDL_ENCODING, HFDL_PRESET
 
     band = HFDL_BANDS.get(args.band)
     if band is None:
@@ -262,59 +319,20 @@ def run_label_check(args) -> int:
                                              explicit_path=args.config))
     status = resolve_radiod_status(resolve_radiod_block(config, args.radiod_id))
     ref = _find_reference(status, args.ref_freq_hz, args.ref_ssrc)
-    ref_fs = int(ref.sample_rate)
-    freq = float(ref.frequency)
     reader = AuthorityReader()
     control = RadiodControl(status, client_id="hfdl-label-check")
     records: list[dict] = []
     try:
         for i in range(args.repeats):
-            ref_c = _Collector(int(args.seconds * ref_fs))
-            probe_c = _Collector(int(args.seconds * band.samprate_hz))
-            ref_ms = MultiStream(control=_PinnedDestination(
-                control, ref.multicast_address))
-            probe_ms = MultiStream(control=control)
-            ref_info = ref_ms.add_channel(
-                frequency_hz=freq, preset=ref.preset, sample_rate=ref_fs,
-                encoding=ref.encoding, on_samples=ref_c)
-            if ref_info.ssrc != ref.ssrc:
-                raise SystemExit(
-                    f"label-check: subscribed SSRC {ref_info.ssrc} is not "
-                    f"hf-timestd's {ref.ssrc}; refusing to measure a "
-                    f"channel of our own")
-            probe_info = probe_ms.add_channel(
-                frequency_hz=freq, preset=HFDL_PRESET,
-                sample_rate=band.samprate_hz, encoding=HFDL_ENCODING,
-                on_samples=probe_c)
-            probe_ms.start()
-            ref_ms.start()
-            try:
-                limit = args.seconds + 30
-                ok = (probe_c.done.wait(limit) and ref_c.done.wait(limit))
-            finally:
-                ref_ms.stop()
-                probe_ms.stop()
-                control.remove_channel(probe_info.ssrc)
-            if not ok:
-                print(f"label-check: repeat {i}: capture timed out",
-                      file=sys.stderr)
-                _wait_gone(control, probe_info.ssrc)
+            rec = _run_repeat(i, control=control, ref=ref, band=band,
+                              seconds=args.seconds, reader=reader)
+            if rec is None:
                 continue
-            a_ref = _label(ref_c, ref_info, ref_fs, reader)
-            a_probe = _label(probe_c, probe_info, band.samprate_hz, reader)
-            lag, corr = labelled_lag_seconds(
-                ref_c.samples(), ref_fs, a_ref.utc,
-                probe_c.samples(), band.samprate_hz, a_probe.utc)
-            snap = a_probe.snapshot
-            rec = build_repeat_record(
-                band=band.name, probe_fs=band.samprate_hz, ref_fs=ref_fs,
-                lag_s=lag, corr=corr, anchor_source=a_probe.source,
-                t_level_active=getattr(snap, "t_level_active", None))
             records.append(rec)
             print(json.dumps(rec) if args.json else
                   f"{band.name} repeat {i}: lag {rec['lag_us']:+.1f} us "
-                  f"corr {corr:.3f} ({a_probe.source})", flush=True)
-            _wait_gone(control, probe_info.ssrc)
+                  f"corr {rec['corr']:.3f} ({rec['anchor_source']})",
+                  flush=True)
     finally:
         control.close()
     if records:
