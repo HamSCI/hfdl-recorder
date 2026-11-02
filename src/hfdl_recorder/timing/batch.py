@@ -27,7 +27,7 @@ Matching a registration to a window's radiod run.  The row's
 hf-timestd documents as unfit for comparison (counter_epoch_tracker, C1), and
 the row holds no epoch offset.  So the match is a time-consistency check: the
 anchor-implied epoch, ``anchor_utc - anchor_index / f_in``, must lie within
-``EPOCH_TOL_S`` of the window's ``input_epoch_gps_s`` converted to UTC.  Two
+``EPOCH_TOL_S`` (2 s, the epoch tracker's skew allowance) of the window's ``input_epoch_gps_s`` converted to UTC.  Two
 radiod runs differ by hours.  Among consistent rows, the one whose anchor UTC
 lies nearest ``t0_utc`` wins, and only inside ``REG_MAX_AGE_S``.
 
@@ -56,8 +56,10 @@ TABLE = "squitter_timing"
 MODE = "hfdl"
 DEFAULT_REGISTRATION_DIR = "/var/lib/timestd/t3_shadow"
 DEFAULT_MAX_WINDOWS = 2000
+FLUSH_EVERY = 100               # windows per durable commit
 REG_MAX_AGE_S = 120.0            # registration must lie this close to the window
-EPOCH_TOL_S = 0.5                # anchor-implied epoch vs the window's own
+EPOCH_TOL_S = 2.0                # anchor-implied epoch vs the window's own; the
+                                 # tracker's skew allowance (B4 pairs reached 0.8 s)
 PLAUSIBLE_DELAY_S = (-0.030, 0.100)   # R12: outside this, a delay is not a squitter's
 
 _GPS_UNIX_S = 315_964_800        # GPS epoch minus Unix epoch
@@ -221,6 +223,15 @@ def _windows(window_dir: Path, radiod_id: Optional[str] = None):
         yield p
 
 
+def _meta_nominal(path: Path) -> Optional[float]:
+    """nominal_utc from the window's meta alone, None if unreadable."""
+    try:
+        with np.load(path, allow_pickle=False) as z:
+            return float(json.loads(str(z["meta"]))["nominal_utc"])
+    except Exception:
+        return None
+
+
 def _done(path: Path) -> Path:
     return path.with_name(path.name + ".done")
 
@@ -237,8 +248,29 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
     counts = {"analysed": 0, "found": 0, "errors": 0, "skipped_done": 0,
               "skipped_since": 0, "deferred": 0}
     rows: list[dict] = []
+    pending: list[Path] = []        # inserted, not yet durable: no .done yet
     writer = None
+    stopped = False
     factory = writer_factory or _default_writer_factory
+
+    def commit() -> bool:
+        """Flush; mark the pending windows done only if nothing stays buffered."""
+        try:
+            writer.flush()
+        except Exception as exc:
+            logger.error("sink flush raised %s: %s", type(exc).__name__, exc)
+        if getattr(writer, "buffered", 0):
+            logger.error("sink flush left %d rows buffered; %d windows stay "
+                         "unmarked and run again", writer.buffered, len(pending))
+            return False
+        for p in pending:
+            try:
+                _done(p).touch()
+            except OSError as exc:
+                logger.warning("cannot mark %s done: %s", p, exc)
+        pending.clear()
+        return True
+
     for path in _windows(window_dir, radiod_id):
         if _done(path).exists():
             counts["skipped_done"] += 1
@@ -246,31 +278,46 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
         if counts["analysed"] >= max_windows:
             counts["deferred"] += 1
             continue
-        try:
-            row = _row_for(path, regs)
-            if since is not None and row["nominal_utc"] < since:
+        if since is not None:
+            nominal = _meta_nominal(path)
+            if nominal is not None and nominal < since:
                 counts["skipped_since"] += 1
                 continue
+        if writer is None:
+            writer = factory(table=TABLE, mode=MODE, schema_version=1,
+                             batch_rows=500, local=True)
+            if getattr(writer, "is_noop", False):
+                logger.error("sink writer is a no-op (sink path unwritable): "
+                             "no rows stored, no windows marked done")
+                stopped = True
+                break
+        try:
+            row = _row_for(path, regs)
         except Exception as exc:     # one bad file never stalls the batch
             logger.warning("batch_error %s: %s: %s", path, type(exc).__name__, exc)
             row = _error_row(path, exc)
             counts["errors"] += 1
-        if writer is None:
-            writer = factory(table=TABLE, mode=MODE, schema_version=1,
-                             batch_rows=500, local=True)
-        writer.insert([row])
-        rows.append(row)
         try:
-            _done(path).touch()
-        except OSError as exc:
-            logger.warning("cannot mark %s done: %s", path, exc)
+            writer.insert([row])
+        except Exception as exc:     # BufferFull under a locked sink, say
+            logger.error("sink insert raised %s: %s; stopping the run",
+                         type(exc).__name__, exc)
+            stopped = True
+            break
+        rows.append(row)
+        pending.append(path)
         counts["analysed"] += 1
         counts["found"] += bool(row["found"])
+        if len(pending) >= FLUSH_EVERY and not commit():
+            stopped = True
+            break
     if writer is not None:
         try:
-            writer.flush()
+            if pending and not stopped and not commit():
+                stopped = True
         finally:
             writer.close()
+    counts["stopped"] = stopped
     if csv_path and rows:
         keys = list(dict.fromkeys(k for r in rows for k in r))
         with open(csv_path, "w", newline="") as f:

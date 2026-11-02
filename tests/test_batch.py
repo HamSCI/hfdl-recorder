@@ -19,24 +19,39 @@ REG_DAY = datetime.fromtimestamp(NOMINAL, timezone.utc).strftime("%Y%m%d")
 
 
 class FakeWriter:
-    def __init__(self):
-        self.inserts = []
+    """Buffers until flush, like the real sink writer."""
+
+    def __init__(self, noop=False, fail_flush=False, fail_insert=False):
+        self.inserts = []           # durable rows
+        self._buf = []
         self.closed = False
-        self.is_noop = False
+        self.is_noop = noop
+        self.fail_flush = fail_flush
+        self.fail_insert = fail_insert
+
+    @property
+    def buffered(self):
+        return len(self._buf)
 
     def insert(self, rows):
-        self.inserts.extend(rows)
+        if self.fail_insert:
+            raise RuntimeError("BufferFull")
+        if not self.is_noop:
+            self._buf.extend(rows)
 
     def flush(self):
-        pass
+        if self.fail_flush or self.is_noop:
+            return
+        self.inserts.extend(self._buf)
+        self._buf = []
 
     def close(self):
         self.closed = True
 
 
 class Factory:
-    def __init__(self):
-        self.writer = FakeWriter()
+    def __init__(self, **kw):
+        self.writer = FakeWriter(**kw)
         self.calls = []
 
     def __call__(self, **kw):
@@ -86,8 +101,8 @@ def _registration(regdir, idx0, *, ahead_s=-60.0, epoch_gps=EPOCH_GPS,
         f.write(json.dumps(row) + "\n")
 
 
-def _run(tmp_path, **kw):
-    fac = Factory()
+def _run(tmp_path, fac=None, **kw):
+    fac = fac or Factory()
     counts = batch.run_batch(tmp_path / "win", registration_dir=tmp_path / "reg",
                              writer_factory=fac, **kw)
     return fac, counts
@@ -252,3 +267,62 @@ def test_csv_output(tmp_path):
     _run(tmp_path, csv_path=out)
     lines = out.read_text().splitlines()
     assert len(lines) == 2 and "delay_s" in lines[0].split(",")
+
+
+def _dones(tmp_path):
+    return list((tmp_path / "win").rglob("*.done"))
+
+
+def test_failed_flush_leaves_no_markers_and_reruns(tmp_path):
+    for i in range(3):
+        _window(tmp_path / "win", 0.0123, frame=i)
+    fac, counts = _run(tmp_path, Factory(fail_flush=True))
+    assert fac.writer.inserts == [] and _dones(tmp_path) == []
+    assert counts["stopped"]
+    fac2, _ = _run(tmp_path)
+    assert len(fac2.writer.inserts) == 3 and len(_dones(tmp_path)) == 3
+
+
+def test_insert_failure_stops_without_marking(tmp_path):
+    _window(tmp_path / "win", 0.0123)
+    fac, counts = _run(tmp_path, Factory(fail_insert=True))
+    assert _dones(tmp_path) == [] and counts["stopped"]
+
+
+def test_noop_writer_marks_nothing(tmp_path):
+    _window(tmp_path / "win", 0.0123)
+    fac, counts = _run(tmp_path, Factory(noop=True))
+    assert _dones(tmp_path) == [] and counts["analysed"] == 0 and counts["stopped"]
+
+
+def test_periodic_commit_marks_only_durable_batches(tmp_path, monkeypatch):
+    monkeypatch.setattr(batch, "FLUSH_EVERY", 2)
+    for i in range(3):
+        _window(tmp_path / "win", 0.0123, frame=i)
+    fac = Factory()
+    real = fac.writer.flush
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) >= 2:          # the final commit fails
+            return
+        real()
+    fac.writer.flush = flaky
+    _run(tmp_path, fac)
+    assert len(fac.writer.inserts) == 2 and len(_dones(tmp_path)) == 2
+
+
+def test_since_skips_before_analysis(tmp_path, monkeypatch):
+    _window(tmp_path / "win", 0.0123)
+    monkeypatch.setattr(batch, "time_squitter",
+                        lambda *a, **k: pytest.fail("analysed a pre-since window"))
+    fac, counts = _run(tmp_path, since=NOMINAL + 10)
+    assert counts["skipped_since"] == 1 and fac.writer.inserts == []
+
+
+def test_registration_skew_up_to_2s_still_matches(tmp_path):
+    _, idx0 = _window(tmp_path / "win", 0.0123)
+    _registration(tmp_path / "reg", idx0, epoch_gps=EPOCH_GPS + 0.8)
+    fac, _ = _run(tmp_path)
+    assert fac.writer.inserts[0]["delay_counter_s"] is not None

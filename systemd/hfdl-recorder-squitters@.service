@@ -36,5 +36,6 @@ NoNewPrivileges=true
 PrivateTmp=false
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/hfdl-recorder /var/lib/sigmond /var/log/hfdl-recorder
+ReadWritePaths=/var/lib/hfdl-recorder /var/log/hfdl-recorder
+ReadWritePaths=-/var/lib/hs-uploader -/var/lib/sigmond
 ReadOnlyPaths=/etc/hfdl-recorder /opt/git/sigmond/hfdl-recorder /var/lib/timestd
