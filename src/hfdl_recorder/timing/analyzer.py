@@ -83,6 +83,13 @@ from .waveform import (
     timing_template,
 )
 
+# Bump whenever a change moves any timing or quality output, so rows from two
+# analysers stay apart (the batch writes it per row and in each .done
+# marker; a marker below this version means "analyse again").
+#   1: through b72dc39 (timed on the pre-key edge)
+#   2: 9874f6f, A1 from the A pair; the pre-key gives Doppler only
+ANALYZER_VERSION = 2
+
 # snr_db = peak / median of the A pair's correlation.  Pure noise scores
 # 12.8 dB median, 14.5 dB worst (200 trials), so 17 dB keeps a margin.  The two
 # weak Riverhead windows dumphfdl could not decode score 15.8 and 16.2.
@@ -140,6 +147,8 @@ class Arrival:
     prekey_lead_s: float            # A1 minus the pre-key tone's start; NaN unobservable
     flags: str                      # comma-separated quality flags, "" when clean
     a1_utc: float                   # start of A1 (UTC); arrival_utc + 448 symbols
+    arrival_offset_s: float = float("nan")   # arrival_utc - t0_utc, formed in-window
+                                             # (no epoch subtraction; full precision)
 
 
 def _render(symbols: np.ndarray, fs: float) -> np.ndarray:
@@ -362,7 +371,7 @@ def _not_found(reason: str, snr_db: float = float("nan")) -> Arrival:
                    peak_width_s=nan, second_peak_ratio=nan,
                    second_peak_delay_s=nan, doppler_hz=nan, m1_shift=None,
                    reason=reason, lobe_distortion=nan, prekey_lead_s=nan,
-                   flags="", a1_utc=nan)
+                   flags="", a1_utc=nan, arrival_offset_s=nan)
 
 
 def time_squitter(x: np.ndarray, fs: float, t0_utc: float, nominal_utc: float,
@@ -370,7 +379,8 @@ def time_squitter(x: np.ndarray, fs: float, t0_utc: float, nominal_utc: float,
     """Time the squitter in window x; see the module docstring for the method.
 
     ``label_lag_s`` is how late the window's UTC label runs; it comes off the
-    arrival.  ``delay_s`` is arrival minus ``nominal_utc``.  Bad data never
+    arrival.  An analysis option only: nothing on the station sets it (the
+    batch leaves it 0, and label-check's result file feeds nothing).  ``delay_s`` is arrival minus ``nominal_utc``.  Bad data never
     raises: it comes back found=False with a reason.
     """
     x = np.asarray(x, dtype=complex)
@@ -480,7 +490,8 @@ def time_squitter(x: np.ndarray, fs: float, t0_utc: float, nominal_utc: float,
     # the small differences first and never by subtracting two epochs.
     start = a1 - PREKEY_LEN * sym                   # the 448-symbol convention
     delay_s = (t0_utc - nominal_utc) + (start / fs - label_lag_s)
-    arrival_utc = t0_utc + (start / fs - label_lag_s)
+    arrival_offset_s = start / fs - label_lag_s
+    arrival_utc = t0_utc + arrival_offset_s
     a1_utc = t0_utc + (a1 / fs - label_lag_s)
 
     return Arrival(
@@ -498,4 +509,5 @@ def time_squitter(x: np.ndarray, fs: float, t0_utc: float, nominal_utc: float,
         prekey_lead_s=float(prekey_lead_s),
         flags=",".join(flags),
         a1_utc=float(a1_utc),
+        arrival_offset_s=float(arrival_offset_s),
     )

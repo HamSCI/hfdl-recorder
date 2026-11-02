@@ -130,8 +130,11 @@ def test_counter_delay_from_registration(tmp_path):
     r = fac.writer.inserts[0]
     assert r["delay_counter_s"] is not None
     assert abs(r["delay_counter_s"] - r["delay_s"]) < 1e-6
-    exp_idx = idx0 + (r["arrival_utc"] - r["t0_utc"]) * F_IN
-    assert abs(r["arrival_input_index"] - exp_idx) < 1.0
+    exp_idx = idx0 + r["arrival_offset_s"] * F_IN
+    assert abs(r["arrival_input_index"] - exp_idx) < 1e-3
+    # the epoch-difference route agrees only to its ~0.24 us grain
+    assert abs(r["arrival_input_index"]
+               - (idx0 + (r["arrival_utc"] - r["t0_utc"]) * F_IN)) < 20.0
 
 
 @pytest.mark.parametrize("kw", [
@@ -326,3 +329,150 @@ def test_registration_skew_up_to_2s_still_matches(tmp_path):
     _registration(tmp_path / "reg", idx0, epoch_gps=EPOCH_GPS + 0.8)
     fac, _ = _run(tmp_path)
     assert fac.writer.inserts[0]["delay_counter_s"] is not None
+
+
+# ---------------------------------------------------------------- final review
+
+def test_no_sink_mode_runs_without_sigmond(tmp_path, monkeypatch):
+    """Off the station: no sigmond installed, rows land in the files."""
+    import sys
+    monkeypatch.setitem(sys.modules, "sigmond", None)
+    monkeypatch.setitem(sys.modules, "sigmond.hamsci_sink", None)
+    for i in range(2):
+        _window(tmp_path / "win", 0.0123, frame=i)
+    js, cs = tmp_path / "out" / "squitter.jsonl", tmp_path / "out" / "squitter.csv"
+    js.parent.mkdir()
+    counts = batch.run_batch(tmp_path / "win", registration_dir=tmp_path / "reg",
+                             sink=False, jsonl_path=js, csv_path=cs)
+    assert counts["analysed"] == 2 and not counts["stopped"]
+    rows = [json.loads(l) for l in js.read_text().splitlines()]
+    assert len(rows) == 2 and all(r["found"] for r in rows)
+    assert len(cs.read_text().splitlines()) == 3
+    assert len(_dones(tmp_path)) == 2
+    # a rerun adds nothing and keeps what the jsonl holds
+    counts = batch.run_batch(tmp_path / "win", registration_dir=tmp_path / "reg",
+                             sink=False, jsonl_path=js)
+    assert counts["analysed"] == 0 and len(js.read_text().splitlines()) == 2
+
+
+def test_no_sink_needs_an_output_file(tmp_path):
+    _window(tmp_path / "win", 0.0123)
+    with pytest.raises(ValueError):
+        batch.run_batch(tmp_path / "win", registration_dir=tmp_path / "reg", sink=False)
+
+
+def test_no_sink_unwritable_output_marks_nothing(tmp_path):
+    _window(tmp_path / "win", 0.0123)
+    counts = batch.run_batch(tmp_path / "win", registration_dir=tmp_path / "reg",
+                             sink=False, jsonl_path=tmp_path / "nodir" / "x.jsonl")
+    assert counts["stopped"] and _dones(tmp_path) == []
+
+
+def test_rows_carry_analyzer_version_and_schema(tmp_path):
+    from hfdl_recorder.timing.analyzer import ANALYZER_VERSION
+    assert ANALYZER_VERSION >= 2
+    _window(tmp_path / "win", 0.0123)
+    fac, _ = _run(tmp_path)
+    assert fac.writer.inserts[0]["analyzer_version"] == ANALYZER_VERSION
+    assert fac.calls[0]["schema_version"] == batch.SCHEMA_VERSION >= 2
+
+
+def test_done_from_an_older_analyser_reanalyses(tmp_path, monkeypatch):
+    from hfdl_recorder.timing.analyzer import ANALYZER_VERSION
+    p, _ = _window(tmp_path / "win", 0.0123)
+    done = p.with_name(p.name + ".done")
+    done.touch()                         # b72dc39 wrote empty markers: version 1
+    fac, counts = _run(tmp_path)
+    assert counts["analysed"] == 1 and len(fac.writer.inserts) == 1
+    assert int(done.read_text()) == ANALYZER_VERSION
+    fac, counts = _run(tmp_path)
+    assert counts["analysed"] == 0 and counts["skipped_done"] == 1
+    done.write_text(str(ANALYZER_VERSION + 1))     # a newer analyser's marker
+    fac, counts = _run(tmp_path)
+    assert counts["analysed"] == 0
+    monkeypatch.setattr(batch, "ANALYZER_VERSION", ANALYZER_VERSION + 2)
+    fac, counts = _run(tmp_path)
+    assert counts["analysed"] == 1
+
+
+def test_arrival_input_index_from_in_window_offset(tmp_path):
+    """No subtraction of two epochs: the index comes from the in-window
+    offset, exact to well under a sample at 64.8 MS/s."""
+    from hfdl_recorder.timing.analyzer import time_squitter
+    p, idx0 = _window(tmp_path / "win", 0.0123)
+    fac, _ = _run(tmp_path)
+    r = fac.writer.inserts[0]
+    with np.load(p) as z:
+        meta = json.loads(str(z["meta"]))
+        arr = time_squitter(z["x"], FS, meta["t0_utc"], meta["nominal_utc"])
+    assert abs(arr.arrival_utc - (meta["t0_utc"] + arr.arrival_offset_s)) < 1e-6
+    assert r["arrival_offset_s"] == pytest.approx(arr.arrival_offset_s, abs=0)
+    assert r["arrival_input_index"] - idx0 == pytest.approx(
+        arr.arrival_offset_s * F_IN, abs=1e-3)
+
+
+def test_window_waits_for_its_registration(tmp_path):
+    """hf-timestd writes the minute row after the window: a window analysed
+    first must stay unmarked and retry, but not forever."""
+    _, idx0 = _window(tmp_path / "win", 0.0123)
+    _registration(tmp_path / "reg", idx0, ahead_s=-300.0)    # newest row: too old
+    fac, counts = _run(tmp_path, now=NOMINAL + 60)
+    assert fac.writer.inserts == [] and _dones(tmp_path) == []
+    assert counts["awaiting_registration"] == 1 and not counts["stopped"]
+    _registration(tmp_path / "reg", idx0, ahead_s=+30.0)     # it arrives
+    fac, counts = _run(tmp_path, now=NOMINAL + 300)
+    assert fac.writer.inserts[0]["delay_counter_s"] is not None
+    assert len(_dones(tmp_path)) == 1
+
+
+def test_registration_absent_for_hours_gives_up(tmp_path):
+    _window(tmp_path / "win", 0.0123)
+    fac, counts = _run(tmp_path, now=NOMINAL + batch.REG_WAIT_S + 1)
+    assert fac.writer.inserts[0]["delay_counter_s"] is None
+    assert len(_dones(tmp_path)) == 1
+
+
+def test_registration_past_the_window_but_unusable_marks_done(tmp_path):
+    _, idx0 = _window(tmp_path / "win", 0.0123)
+    _registration(tmp_path / "reg", idx0, ahead_s=+300.0)    # newer, too far
+    fac, counts = _run(tmp_path, now=NOMINAL + 400)
+    assert fac.writer.inserts[0]["delay_counter_s"] is None
+    assert len(_dones(tmp_path)) == 1
+
+
+def test_cli_exits_nonzero_when_the_run_stopped(tmp_path, monkeypatch):
+    import sys
+    from hfdl_recorder import cli
+    from hfdl_recorder.timing import batch as b
+    seen = {}
+
+    def fake(window_dir, **kw):
+        seen["dir"] = window_dir
+        return {"stopped": True}
+    monkeypatch.setattr(b, "run_batch", fake)
+    monkeypatch.setattr(sys, "argv", ["hfdl-recorder", "squitter-analyze",
+                                      "--dir", str(tmp_path)])
+    with pytest.raises(SystemExit) as e:
+        cli.main()
+    assert e.value.code == 1
+
+
+def test_cli_dir_defaults_from_config(tmp_path, monkeypatch):
+    import sys
+    from hfdl_recorder import cli
+    from hfdl_recorder.timing import batch as b
+    cfg = tmp_path / "c.toml"
+    cfg.write_text('[timing_squitters]\nwindow_dir = "%s"\n\n[[radiod]]\nid = "r"\n'
+                   'status = "r.local"\n' % (tmp_path / "w"))
+    seen = {}
+
+    def fake(window_dir, **kw):
+        seen["dir"] = window_dir
+        return {"stopped": False}
+    monkeypatch.setattr(b, "run_batch", fake)
+    monkeypatch.setattr(sys, "argv", ["hfdl-recorder", "squitter-analyze",
+                                      "--config", str(cfg)])
+    with pytest.raises(SystemExit) as e:
+        cli.main()
+    assert e.value.code == 0
+    assert str(seen["dir"]) == str(tmp_path / "w")

@@ -159,16 +159,26 @@ def build_parser() -> argparse.ArgumentParser:
         "squitter-analyze",
         help="time saved squitter windows into the local squitter_timing table",
     )
-    sub_sq.add_argument("--dir", type=Path,
-                        default=Path("/var/lib/hfdl-recorder/squitters"),
-                        help="window directory ([timing_squitters] window_dir)")
+    sub_sq.add_argument("--dir", type=Path, default=None,
+                        help="window directory (default: the config's "
+                             "[timing_squitters] window_dir)")
+    sub_sq.add_argument("--instance", default=None,
+                        help="resolve the config as the daemon does "
+                             "(/etc/hfdl-recorder/<instance>.toml, else the "
+                             "shared config)")
     sub_sq.add_argument("--radiod-id", default=None,
                         help="analyse this radiod's windows only")
     sub_sq.add_argument("--since", default=None,
                         help="skip windows nominally before this UTC time "
                              "(ISO 8601, or Unix seconds)")
     sub_sq.add_argument("--csv", type=Path, default=None,
-                        help="also write the rows to this CSV file")
+                        help="also write this run's rows to this CSV file")
+    sub_sq.add_argument("--jsonl", type=Path, default=None,
+                        help="also append the rows to this JSON-lines file")
+    sub_sq.add_argument("--no-sink", action="store_true",
+                        help="store rows only in --csv/--jsonl, never in "
+                             "sigmond's sink (off-station use; sigmond need "
+                             "not be installed)")
     sub_sq.add_argument("--registration-dir", type=Path,
                         default=Path("/var/lib/timestd/t3_shadow"),
                         help="hf-timestd T3 shadow minute rows (read only)")
@@ -243,13 +253,40 @@ def main():
         from hfdl_recorder.timing.label_check import run_label_check
         sys.exit(run_label_check(args))
     elif args.command == "squitter-analyze":
-        from hfdl_recorder.timing.batch import run_batch
-        run_batch(args.dir, registration_dir=args.registration_dir,
-                  since=_parse_since(args.since), radiod_id=args.radiod_id,
-                  max_windows=args.max_windows, csv_path=args.csv)
+        sys.exit(_handle_squitter_analyze(args, parser))
     else:
         parser.print_help()
         sys.exit(1)
+
+
+def _squitter_dir(args) -> Path:
+    """--dir, else [timing_squitters] window_dir from the config the daemon
+    reads, else the built-in default when no config exists (off-station)."""
+    if args.dir is not None:
+        return args.dir
+    from hfdl_recorder.config import DEFAULTS, load_config, resolve_config_path
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        path = resolve_config_path(instance=args.instance, explicit_path=args.config)
+    try:
+        return Path(load_config(path)["timing_squitters"]["window_dir"])
+    except FileNotFoundError:
+        default = DEFAULTS["timing_squitters"]["window_dir"]
+        logging.warning("no config at %s; window dir defaults to %s", path, default)
+        return Path(default)
+
+
+def _handle_squitter_analyze(args, parser) -> int:
+    from hfdl_recorder.timing import batch
+    if args.no_sink and not (args.csv or args.jsonl):
+        parser.error("--no-sink needs --csv or --jsonl")
+    counts = batch.run_batch(
+        _squitter_dir(args), registration_dir=args.registration_dir,
+        since=_parse_since(args.since), radiod_id=args.radiod_id,
+        max_windows=args.max_windows, csv_path=args.csv, jsonl_path=args.jsonl,
+        sink=not args.no_sink)
+    return 1 if counts.get("stopped") else 0
 
 
 def _handle_config(args):

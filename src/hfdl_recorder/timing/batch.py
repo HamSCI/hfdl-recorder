@@ -4,8 +4,22 @@
 keeper's files), times each squitter with ``time_squitter``, and inserts one
 ``squitter_timing`` row per window into sigmond's local sink (table
 ``squitter_timing``, mode ``hfdl``, ``local=True``).  A ``.done`` marker
-beside each window records that it has been analysed, so a rerun inserts
-nothing.  One run handles at most ``max_windows`` windows.
+beside each window records that it has been analysed, and by which
+analyser: it holds ``ANALYZER_VERSION`` (an empty marker, as b72dc39 wrote,
+counts as version 1).  A marker below the running analyser's version counts
+as not done, so new timing code re-times old windows; every row carries
+``analyzer_version`` to keep the two apart.  One run handles at most
+``max_windows`` windows.
+
+Off the station (``sink=False``) the same code runs without sigmond: rows go
+to ``jsonl_path`` (appended) and/or ``csv_path`` (this run's rows), and a
+window gets its marker only after the file is written and fsynced.
+
+A window whose registration has not arrived yet (hf-timestd writes the
+minute row after the minute) gets no row and no marker while the newest
+registration row lies before the window (+``REG_MAX_AGE_S``), so a later run
+retries it.  After ``REG_WAIT_S`` past the window's nominal time (host clock:
+a retry deadline only, it labels nothing) it is timed without one.
 
 Each row carries the window metadata, every ``Arrival`` field, and three
 derived values:
@@ -32,7 +46,8 @@ radiod runs differ by hours.  Among consistent rows, the one whose anchor UTC
 lies nearest ``t0_utc`` wins, and only inside ``REG_MAX_AGE_S``.
 
 The host clock labels nothing here.  Window files and minute rows carry every
-time this module uses.
+time this module uses; the host clock only bounds how long a window waits
+for its registration.
 """
 
 from __future__ import annotations
@@ -41,6 +56,8 @@ import csv
 import json
 import logging
 import math
+import os
+import time
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -48,26 +65,29 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from hfdl_recorder.timing.analyzer import time_squitter
+from hfdl_recorder.timing.analyzer import ANALYZER_VERSION, time_squitter
 
 logger = logging.getLogger(__name__)
 
 TABLE = "squitter_timing"
 MODE = "hfdl"
 DEFAULT_REGISTRATION_DIR = "/var/lib/timestd/t3_shadow"
+SCHEMA_VERSION = 2               # 2: analyzer_version, arrival_offset_s
 DEFAULT_MAX_WINDOWS = 2000
 FLUSH_EVERY = 100               # windows per durable commit
 REG_MAX_AGE_S = 120.0            # registration must lie this close to the window
 EPOCH_TOL_S = 2.0                # anchor-implied epoch vs the window's own; the
                                  # tracker's skew allowance (B4 pairs reached 0.8 s)
 PLAUSIBLE_DELAY_S = (-0.030, 0.100)   # R12: outside this, a delay is not a squitter's
+REG_WAIT_S = 7200.0              # wait this long past nominal for a registration
 
 _GPS_UNIX_S = 315_964_800        # GPS epoch minus Unix epoch
 _GPS_LEAP_S = 18                 # GPS minus UTC
 
 _NAN_FIELDS = ("arrival_utc", "delay_s", "snr_db", "peak_width_s",
                "second_peak_ratio", "second_peak_delay_s", "doppler_hz",
-               "lobe_distortion", "prekey_lead_s", "a1_utc")
+               "lobe_distortion", "prekey_lead_s", "a1_utc",
+               "arrival_offset_s")
 
 
 def _clean(v):
@@ -109,6 +129,15 @@ class Registrations:
         self._cache[day] = out
         return out
 
+    def newest_after(self, t: float) -> bool:
+        """True when some row, any run, lies later than t (UTC seconds)."""
+        t0 = datetime.fromtimestamp(t, timezone.utc)
+        for d in (0, 1, 2):
+            day = (t0 + timedelta(days=d)).strftime("%Y%m%d")
+            if any(ns / 1e9 > t for ns, _ in self._day(day)):
+                return True
+        return False
+
     def nearest(self, t0_utc: float, epoch_utc: float,
                 f_in: float) -> Optional[tuple[int, float]]:
         """(anchor_utc_ns, anchor_index) of the usable row nearest t0_utc."""
@@ -142,7 +171,9 @@ def _exclusions(row: dict) -> str:
     return ",".join(out)
 
 
-def _row_for(path: Path, regs: Registrations) -> dict:
+def _row_for(path: Path, regs: Registrations) -> tuple[dict, bool]:
+    """(row, registration_missing): the flag says a usable registration was
+    wanted (the window carries an input index) but none matched."""
     with np.load(path, allow_pickle=False) as z:
         x = np.asarray(z["x"])
         meta = json.loads(str(z["meta"]))
@@ -159,11 +190,13 @@ def _row_for(path: Path, regs: Registrations) -> dict:
                          if meta.get("decimation") is not None else None)
     row["radiod_id"] = path.parent.parent.name
     row["window_file"] = path.name
+    row["analyzer_version"] = ANALYZER_VERSION
     for k, v in asdict(arr).items():
         row[k] = _clean(v)
     row["arrival_input_index"] = None
     row["delay_counter_s"] = None
     row["label_diff_s"] = None
+    missing = False
 
     idx0, f_in = meta.get("input_index0"), meta.get("input_samprate")
     epoch_gps = meta.get("input_epoch_gps_s")
@@ -171,8 +204,11 @@ def _row_for(path: Path, regs: Registrations) -> dict:
         idx0, f_in = float(idx0), float(f_in)
         epoch_utc = float(epoch_gps) + _GPS_UNIX_S - _GPS_LEAP_S
         if arr.found:
-            row["arrival_input_index"] = idx0 + (arr.arrival_utc - t0) * f_in
+            # The analyser's in-window offset, never arrival_utc - t0: two
+            # epochs subtract to ~0.24 us grain, 15 input samples.
+            row["arrival_input_index"] = idx0 + arr.arrival_offset_s * f_in
         reg = regs.nearest(t0, epoch_utc, f_in)
+        missing = reg is None
         if reg is not None:
             a_ns, a_idx = reg
             a_whole, a_rem = divmod(a_ns, 10**9)
@@ -188,12 +224,12 @@ def _row_for(path: Path, regs: Registrations) -> dict:
                 row["delay_counter_s"] = (
                     utc_minus_ref(row["arrival_input_index"]) - (nominal - ref))
     row["excluded"] = _exclusions(row)
-    return row
+    return row, missing
 
 
 def _error_row(path: Path, exc: Exception) -> dict:
     row = {"radiod_id": path.parent.parent.name, "window_file": path.name,
-           "found": False, "reason": f"batch_error:{type(exc).__name__}",
+           "analyzer_version": ANALYZER_VERSION, "found": False, "reason": f"batch_error:{type(exc).__name__}",
            "arrival_input_index": None, "delay_counter_s": None,
            "label_diff_s": None, "excluded": ""}
     for k in _NAN_FIELDS:
@@ -236,43 +272,133 @@ def _done(path: Path) -> Path:
     return path.with_name(path.name + ".done")
 
 
+def _done_version(path: Path) -> Optional[int]:
+    """The analyser version a window's marker names; None without a marker.
+    An empty or unreadable marker (b72dc39 wrote empty ones) counts as 1."""
+    try:
+        text = _done(path).read_text().strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return 1
+    try:
+        return int(text) if text else 1
+    except ValueError:
+        return 1
+
+
+def _mark_done(path: Path) -> None:
+    tmp = _done(path).with_name(_done(path).name + ".tmp")
+    tmp.write_text(f"{ANALYZER_VERSION}\n")
+    os.replace(tmp, _done(path))
+
+
+def _write_csv(csv_path, rows: list[dict]) -> None:
+    """All of ``rows``, written to a temporary file, fsynced, then renamed."""
+    keys = list(dict.fromkeys(k for r in rows for k in r))
+    csv_path = Path(csv_path)
+    tmp = csv_path.with_name(csv_path.name + ".tmp")
+    with open(tmp, "w", newline="") as f:
+        wr = csv.DictWriter(f, fieldnames=keys)
+        wr.writeheader()
+        wr.writerows(rows)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, csv_path)
+
+
+def _append_jsonl(jsonl_path, rows: list[dict]) -> None:
+    with open(jsonl_path, "a") as f:
+        for r in rows:
+            f.write(json.dumps(r, sort_keys=True) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+class _FileSink:
+    """``sink=False``: rows go to files; a flush is durable or raises."""
+
+    is_noop = False
+
+    def __init__(self, csv_path, jsonl_path):
+        self._csv, self._jsonl = csv_path, jsonl_path
+        self._all: list[dict] = []
+        self._buf: list[dict] = []
+
+    @property
+    def buffered(self) -> int:
+        return len(self._buf)
+
+    def insert(self, rows):
+        self._buf.extend(rows)
+
+    def flush(self):
+        if not self._buf:
+            return
+        if self._jsonl:
+            _append_jsonl(self._jsonl, self._buf)
+        if self._csv:
+            _write_csv(self._csv, self._all + self._buf)
+        self._all.extend(self._buf)
+        self._buf = []
+
+    def close(self):
+        pass
+
+
 def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
               since: Optional[float] = None,
               radiod_id: Optional[str] = None,
               max_windows: int = DEFAULT_MAX_WINDOWS,
-              csv_path=None,
-              writer_factory: Optional[Callable[..., object]] = None) -> dict:
-    """Analyse windows not yet marked done; returns the run's counts."""
+              csv_path=None, jsonl_path=None, sink: bool = True,
+              writer_factory: Optional[Callable[..., object]] = None,
+              now: Optional[float] = None) -> dict:
+    """Analyse windows not yet marked done (by this analyser version);
+    returns the run's counts.  ``counts["stopped"]`` says the run gave up on
+    its store; the CLI exits non-zero then.
+
+    ``sink=False`` needs ``csv_path`` or ``jsonl_path`` and never imports
+    sigmond.  With the sink, the files are an extra copy written at the end."""
+    if not sink and not (csv_path or jsonl_path):
+        raise ValueError("sink=False needs csv_path or jsonl_path")
     window_dir = Path(window_dir)
     regs = Registrations(Path(registration_dir))
+    now = time.time() if now is None else float(now)
     counts = {"analysed": 0, "found": 0, "errors": 0, "skipped_done": 0,
-              "skipped_since": 0, "deferred": 0}
+              "skipped_since": 0, "deferred": 0, "awaiting_registration": 0}
     rows: list[dict] = []
     pending: list[Path] = []        # inserted, not yet durable: no .done yet
     writer = None
     stopped = False
-    factory = writer_factory or _default_writer_factory
+    if sink:
+        factory = writer_factory or _default_writer_factory
+    else:
+        factory = lambda **kw: _FileSink(csv_path, jsonl_path)   # noqa: E731
 
     def commit() -> bool:
         """Flush; mark the pending windows done only if nothing stays buffered."""
         try:
             writer.flush()
         except Exception as exc:
-            logger.error("sink flush raised %s: %s", type(exc).__name__, exc)
+            logger.error("%s flush raised %s: %s", "sink" if sink else "file",
+                         type(exc).__name__, exc)
+            if not sink:
+                return False
         if getattr(writer, "buffered", 0):
-            logger.error("sink flush left %d rows buffered; %d windows stay "
+            logger.error("flush left %d rows buffered; %d windows stay "
                          "unmarked and run again", writer.buffered, len(pending))
             return False
         for p in pending:
             try:
-                _done(p).touch()
+                _mark_done(p)
             except OSError as exc:
                 logger.warning("cannot mark %s done: %s", p, exc)
         pending.clear()
         return True
 
     for path in _windows(window_dir, radiod_id):
-        if _done(path).exists():
+        v = _done_version(path)
+        if v is not None and v >= ANALYZER_VERSION:
             counts["skipped_done"] += 1
             continue
         if counts["analysed"] >= max_windows:
@@ -284,7 +410,7 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
                 counts["skipped_since"] += 1
                 continue
         if writer is None:
-            writer = factory(table=TABLE, mode=MODE, schema_version=1,
+            writer = factory(table=TABLE, mode=MODE, schema_version=SCHEMA_VERSION,
                              batch_rows=500, local=True)
             if getattr(writer, "is_noop", False):
                 logger.error("sink writer is a no-op (sink path unwritable): "
@@ -292,11 +418,17 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
                 stopped = True
                 break
         try:
-            row = _row_for(path, regs)
+            row, missing = _row_for(path, regs)
         except Exception as exc:     # one bad file never stalls the batch
             logger.warning("batch_error %s: %s: %s", path, type(exc).__name__, exc)
-            row = _error_row(path, exc)
+            row, missing = _error_row(path, exc), False
             counts["errors"] += 1
+        if missing and row.get("nominal_utc") is not None:
+            nominal = float(row["nominal_utc"])
+            if (not regs.newest_after(nominal + REG_MAX_AGE_S)
+                    and now - nominal < REG_WAIT_S):
+                counts["awaiting_registration"] += 1   # retried next run
+                continue
         try:
             writer.insert([row])
         except Exception as exc:     # BufferFull under a locked sink, say
@@ -318,11 +450,13 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
         finally:
             writer.close()
     counts["stopped"] = stopped
-    if csv_path and rows:
-        keys = list(dict.fromkeys(k for r in rows for k in r))
-        with open(csv_path, "w", newline="") as f:
-            wr = csv.DictWriter(f, fieldnames=keys)
-            wr.writeheader()
-            wr.writerows(rows)
+    if sink and rows:
+        try:
+            if csv_path:
+                _write_csv(csv_path, rows)
+            if jsonl_path:
+                _append_jsonl(jsonl_path, rows)
+        except OSError as exc:
+            logger.error("cannot write the row copy: %s", exc)
     logger.info("squitter-analyze: %s", counts)
     return counts
