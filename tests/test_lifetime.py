@@ -151,6 +151,10 @@ class _DaemonForKeepAliveTests:
         return HfdlRecorder(cfg, radiod)
 
 
+def _P(ssrc):
+    return mock.Mock(current_ssrc=ssrc)
+
+
 class KeepAliveLoopTests(unittest.TestCase):
 
     def test_no_thread_started_when_no_entries(self):
@@ -161,7 +165,8 @@ class KeepAliveLoopTests(unittest.TestCase):
     def test_thread_refreshes_all_entries(self):
         rec = _DaemonForKeepAliveTests.make(200)
         m1, m2 = mock.MagicMock(), mock.MagicMock()
-        rec._lifetime_entries = [(m1, 100), (m1, 101), (m2, 200)]
+        # Entries carry the pipeline; the keep-alive reads its current SSRC.
+        rec._lifetime_entries = [(m1, _P(100)), (m1, _P(101)), (m2, _P(200))]
         rec._running = True
 
         thread = threading.Thread(
@@ -181,7 +186,7 @@ class KeepAliveLoopTests(unittest.TestCase):
         m_bad = mock.MagicMock()
         m_bad.set_channel_lifetime.side_effect = RuntimeError("radiod down")
         m_good = mock.MagicMock()
-        rec._lifetime_entries = [(m_bad, 100), (m_good, 200)]
+        rec._lifetime_entries = [(m_bad, _P(100)), (m_good, _P(200))]
         rec._running = True
 
         thread = threading.Thread(

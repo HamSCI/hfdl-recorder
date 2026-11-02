@@ -69,6 +69,9 @@ class BandPipeline:
         # BandPipeline.may_poll reads these so no status poll ever reaches
         # an SSRC radiod does not have (a poll would mint a channel).
         self._ssrc: int | None = None
+        # The frequency the channel reports (ChannelInfo), which status
+        # replies must match; band.center_hz until a ChannelInfo says.
+        self._channel_freq_hz: float = float(band.center_hz)
         self._dropped = False
         self._last_sample_mono = 0.0
 
@@ -103,6 +106,7 @@ class BandPipeline:
             lifetime=lifetime,
         )
         self._ssrc = info.ssrc
+        self._note_channel_freq(info)
         return info.ssrc
 
     # A status poll to this SSRC is safe only while all of these hold.
@@ -112,14 +116,26 @@ class BandPipeline:
     def current_ssrc(self) -> int | None:
         return self._ssrc
 
+    @property
+    def channel_freq_hz(self) -> float:
+        return self._channel_freq_hz
+
+    def _note_channel_freq(self, info) -> None:
+        f = getattr(info, "frequency", None)
+        # 0, None or anything not a number: radiod did not say.
+        if isinstance(f, (int, float)) and not isinstance(f, bool) and f > 0:
+            self._channel_freq_hz = float(f)
+
     def may_poll(self, ssrc: int) -> bool:
         """True when a command to ``ssrc`` cannot mint a channel on radiod:
         it is the slot's current SSRC, MultiStream still holds that slot,
         the stream is up, and a sample arrived in the last 0.5 s."""
         if ssrc is None or ssrc != self._ssrc or self._dropped:
             return False
+        # Fail closed: a MultiStream without the slot table (or without
+        # this SSRC in it) gets no command.
         slots = getattr(self._multi, "_slots", None)
-        if slots is not None and ssrc not in slots:
+        if slots is None or ssrc not in slots:
             return False
         return time.monotonic() - self._last_sample_mono <= self.POLL_SAMPLE_AGE_SEC
 
@@ -346,6 +362,8 @@ class BandPipeline:
             logger.warning("%s: stream restored on a new SSRC %s (was %s)",
                            self._band.name, new_ssrc, self._ssrc)
             self._ssrc = new_ssrc
+        if channel_info is not None:
+            self._note_channel_freq(channel_info)
         self._dropped = False
         logger.info("%s: ka9q-radio stream restored", self._band.name)
 

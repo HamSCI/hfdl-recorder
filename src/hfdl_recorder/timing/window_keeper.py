@@ -211,6 +211,7 @@ class WindowKeeper:
         self._last_prune: Optional[float] = None
         self._current_day: Optional[str] = None   # from the latest window's nominal UTC
         self._frame_bad = False
+        self._anchor_bad = False           # in a streak of failed anchors
 
         self._stats = {
             "saved": 0, "dropped_queue": 0, "dropped_disk": 0,
@@ -524,7 +525,16 @@ class WindowKeeper:
             # anchor it has meanwhile).
             self._stats["anchor_failures"] += 1
             self._next_anchor_abs = abs_ + int(ANCHOR_RETRY_S * self._fs)
+            if not self._anchor_bad:
+                self._anchor_bad = True
+                logger.warning(
+                    "%s: no anchor (no valid status reply with a status pair); "
+                    "retrying every %.0f s of samples, silently until one succeeds",
+                    self._band.name, ANCHOR_RETRY_S)
             return
+        if self._anchor_bad:
+            self._anchor_bad = False
+            logger.info("%s: anchor recovered", self._band.name)
         if gen != self._gen:
             return                          # another discontinuity since asking
         old = self._anchor

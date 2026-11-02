@@ -292,3 +292,26 @@ def test_gap_samples_reach_keeper():
     pipeline._on_samples(np.zeros(4, np.complex64),
                          SimpleNamespace(delivered_rtp_start=5, batch_gaps=[]))
     assert rec.gaps == [120, 0]
+
+
+def test_may_poll_fails_closed_without_slots():
+    class _NoSlots:
+        def add_channel(self, **kw):
+            return SimpleNamespace(ssrc=0x10)
+
+    pipeline = BandPipeline(band=HFDL_BANDS["HFDL13"], radiod_id="rx888",
+                            config=_make_config())
+    pipeline._first_sample_logged = True
+    pipeline.attach(_NoSlots())
+    pipeline._on_samples(np.zeros(4, np.complex64), None)
+    assert not pipeline.may_poll(0x10)
+
+
+def test_channel_frequency_follows_channel_info():
+    pipeline, multi = _attached(0x10)
+    assert pipeline.channel_freq_hz == HFDL_BANDS["HFDL13"].center_hz
+    multi._slots = {0x20: object()}
+    pipeline._on_stream_restored(SimpleNamespace(ssrc=0x20, frequency=13_310_002.0))
+    assert pipeline.channel_freq_hz == 13_310_002.0
+    pipeline._on_stream_restored(SimpleNamespace(ssrc=0x20, frequency=0.0))
+    assert pipeline.channel_freq_hz == 13_310_002.0     # 0 means unknown

@@ -40,6 +40,10 @@ class _Control:
 class _FakeMulti:
     def __init__(self, ssrc):
         self._slots = {ssrc: object()}
+        self.lifetimes = []
+
+    def set_channel_lifetime(self, ssrc, frames):
+        self.lifetimes.append((ssrc, frames))
 
     def add_channel(self, **kw):
         return SimpleNamespace(ssrc=next(iter(self._slots)))
@@ -101,3 +105,46 @@ def test_no_keeper_when_disabled(tmp_path):
     assert rec._timing_cfg.get("enabled") is False
     rec._start_timing()
     assert rec._keepers == [] and rec._timing_thread is None
+
+
+def test_lifetime_keepalive_follows_rekeyed_ssrc(tmp_path):
+    cfg = _config(tmp_path, False)
+    cfg["processing"]["radiod_lifetime_frames"] = 6000
+    rec = HfdlRecorder(cfg, {"status": "x.local"})
+    pipeline = BandPipeline(band=HFDL_BANDS["HFDL13"], radiod_id="x.local",
+                            config=cfg)
+    multi = _FakeMulti(0x10)
+    pipeline.attach(multi, lifetime=6000)
+    rec._pipelines.append(pipeline)
+    rec._lifetime_entries.append((multi, pipeline))
+    rec._refresh_lifetimes()
+    multi._slots = {0x20: object()}
+    pipeline._on_stream_restored(SimpleNamespace(ssrc=0x20))
+    rec._refresh_lifetimes()
+    assert multi.lifetimes == [(0x10, 6000), (0x20, 6000)]
+
+
+def test_anchor_uses_channel_reported_frequency(tmp_path):
+    import numpy as np
+    rec, pipeline, multi = _built(tmp_path, 0x10)
+    keeper = rec._keepers[0][0]
+    multi._slots = {0x20: object()}
+    pipeline._on_stream_restored(SimpleNamespace(ssrc=0x20, frequency=13_310_002.0))
+    pipeline._on_samples(np.zeros(4, np.complex64), None)
+    got = []
+    rec._control.listen_status = lambda cb, duration=None, ssrcs=None: got.append(ssrcs)
+    seen = []
+    import hfdl_recorder.timing.channel_status as cs
+    orig = cs.gather_status
+
+    def spy(*a, **kw):
+        seen.append(kw["freq_hz"])
+        return orig(*a, **kw)
+
+    cs.gather_status = spy
+    try:
+        keeper._anchor_fn(1)
+        rec._refresh_counter_maps()
+    finally:
+        cs.gather_status = orig
+    assert seen == [13_310_002.0, 13_310_002.0]     # anchor, then counter map

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +33,12 @@ def reply(block, *, r0=5_000, i0=10**12, epoch_gps=1.4e9, late_s=0.0,
         rtp_timesnap=(r0 + block * OLEN) & 0xFFFFFFFF,
         filter_blocksize=ILEN, output_samprate=rate,
         frontend=SimpleNamespace(input_samples=n_in, input_samprate=F_IN))
+
+
+@pytest.fixture(autouse=True)
+def _fresh_reject_log(monkeypatch):
+    import hfdl_recorder.timing.channel_status as cs
+    monkeypatch.setattr(cs, "_REJECTS", cs._RejectLog())
 
 
 def _cm(**kw):
@@ -185,3 +192,27 @@ def test_least_late_anchor_never_falls_back_to_host_clock():
                                             output_samprate=F_OUT,
                                             gps_time=None, rtp_timesnap=None)] * 5)
     assert _anchor(ctl, 0) is None
+
+
+def test_rejected_replies_logged_once_per_streak(caplog):
+    caplog.set_level(logging.WARNING, logger="hfdl_recorder.timing.channel_status")
+    bad = reply(1, freq=FREQ + 3.0)
+
+    def gather(r):
+        return gather_status(_Control(replies=[r] * 3), SSRC, 3, rate=F_OUT,
+                             freq_hz=FREQ, gate=lambda s: True, listen_s=0)
+
+    assert gather(bad) == [] and gather(bad) == []
+    warns = [r.getMessage() for r in caplog.records]
+    assert len(warns) == 1
+    assert "13310003" in warns[0] and "13310000" in warns[0]
+    assert str(F_OUT) in warns[0]
+    assert len(gather(reply(2))) == 3          # a good reply ends the streak
+    gather(bad)
+    assert len(caplog.records) == 2
+    # The counter map shares the same once-per-streak warning.
+    cm = _cm()
+    cm.add_reply(reply(5))                     # ends the open streak
+    cm.add_reply(reply(3, rate=12_000))
+    cm.add_reply(reply(4, rate=12_000))
+    assert len(caplog.records) == 3

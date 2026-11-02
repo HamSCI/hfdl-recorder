@@ -53,7 +53,9 @@ class HfdlRecorder:
         self._multi_streams: list = []
         # (MultiStream, ssrc) pairs for LIFETIME keep-alive — populated
         # at provisioning, consumed by the lifetime thread.
-        self._lifetime_entries: list[tuple[object, int]] = []
+        # (MultiStream, BandPipeline): the keep-alive refreshes the slot's
+        # CURRENT SSRC, which MultiStream may re-key on a restore.
+        self._lifetime_entries: list[tuple[object, BandPipeline]] = []
         self._ch_tailers: list[ChTailer] = []
         self._control = None
         self._running = False
@@ -185,7 +187,7 @@ class HfdlRecorder:
             )
             ssrc = pipeline.attach(multi, lifetime=lifetime_arg)
             if lifetime_arg is not None:
-                self._lifetime_entries.append((multi, ssrc))
+                self._lifetime_entries.append((multi, pipeline))
             self._pipelines.append(pipeline)
             if self._timing_cfg.get("enabled"):
                 try:
@@ -231,9 +233,10 @@ class HfdlRecorder:
 
         def anchor_fn(rtp: int):
             live = pipeline.current_ssrc
-            counter.bind(live)
+            freq = pipeline.channel_freq_hz
+            counter.bind(live, freq)
             return least_late_anchor(
-                control, live, rtp, band.samprate_hz, freq_hz=band.center_hz,
+                control, live, rtp, band.samprate_hz, freq_hz=freq,
                 gate=pipeline.may_poll, authority_reader=reader, counter=counter)
 
         def tier_fn():
@@ -297,11 +300,12 @@ class HfdlRecorder:
             ssrc = pipeline.current_ssrc
             if ssrc is None:
                 continue
-            counter.bind(ssrc)
+            freq = pipeline.channel_freq_hz
+            counter.bind(ssrc, freq)
             band = pipeline.band
             for reply in gather_status(
                     self._control, ssrc, counter.polls_wanted,
-                    rate=band.samprate_hz, freq_hz=band.center_hz,
+                    rate=band.samprate_hz, freq_hz=freq,
                     gate=pipeline.may_poll):
                 counter.add_reply(reply)
 
@@ -424,15 +428,22 @@ class HfdlRecorder:
             time.sleep(interval_sec)
             if not self._running:
                 break
-            for multi, ssrc in self._lifetime_entries:
-                try:
-                    multi.set_channel_lifetime(
-                        ssrc, self._radiod_lifetime_frames
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "lifetime keepalive failed (ssrc=%s): %s", ssrc, exc,
-                    )
+            self._refresh_lifetimes()
+
+    def _refresh_lifetimes(self) -> None:
+        """One keep-alive pass, to each slot's current SSRC.  A build-time
+        SSRC goes stale after a re-key: set_channel_lifetime no-ops for it,
+        nothing refreshes the new channel, and radiod reaps it."""
+        for multi, pipeline in self._lifetime_entries:
+            ssrc = pipeline.current_ssrc
+            if ssrc is None:
+                continue
+            try:
+                multi.set_channel_lifetime(ssrc, self._radiod_lifetime_frames)
+            except Exception as exc:
+                logger.warning(
+                    "lifetime keepalive failed (ssrc=%s): %s", ssrc, exc,
+                )
 
     # -- systemd integration --
 

@@ -661,3 +661,27 @@ def test_failed_save_leaves_no_tmp(tmp_path, monkeypatch):
         k.stop()
     assert list(tmp_path.rglob("*.tmp")) == []
     assert k.stats()["errors"] == 1 and k.stats()["saved"] == 0
+
+
+def test_anchor_failure_logged_once_per_streak(tmp_path, caplog):
+    s = Stream(FRAME0 + 1.0, rtp0=5)
+    calls = {"n": 0}
+
+    def flaky(rtp):
+        calls["n"] += 1
+        return None if calls["n"] <= 2 else s.anchor_fn(rtp)
+
+    k = WindowKeeper(band=BAND, fs=FS, out_dir=tmp_path, ground_stations=CHOSEN,
+                     anchor_fn=flaky, counter_map_fn=lambda: None, min_free_gb=0)
+    k.start()
+    caplog.set_level(logging.WARNING, logger="hfdl_recorder.timing.window_keeper")
+    try:
+        # Let the writer finish each request before the next block, without
+        # waiting on an anchor that is meant to fail.
+        s.run(k, 25.0, pace=False, on_block=lambda utc: k.flush())
+        k.flush()
+    finally:
+        k.stop()
+    assert k.stats()["anchor_failures"] == 2
+    assert k.stats()["anchors"] == 1
+    assert sum("no anchor" in r.getMessage() for r in caplog.records) == 1

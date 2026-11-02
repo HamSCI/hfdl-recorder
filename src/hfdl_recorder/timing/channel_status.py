@@ -61,6 +61,44 @@ def reply_matches(reply, ssrc: int, output_samprate: int, freq_hz: float) -> boo
     return f is not None and abs(float(f) - float(freq_hz)) <= FREQ_TOL_HZ
 
 
+class _RejectLog:
+    """Warn once per streak, per SSRC, when replies fail ``reply_matches``.
+
+    If radiod reports another rate or frequency than the band expects, every
+    reply gets rejected and no anchor or counter map ever forms; without this
+    the failure would stay silent.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._bad: set = set()
+
+    def check(self, reply, ssrc: int, rate: int, freq_hz: float) -> bool:
+        ok = reply_matches(reply, ssrc, rate, freq_hz)
+        with self._lock:
+            if ok:
+                if ssrc in self._bad:
+                    self._bad.discard(ssrc)
+                    logger.info("status replies for ssrc %d match the band again", ssrc)
+                return True
+            first = ssrc not in self._bad
+            self._bad.add(ssrc)
+        if first:
+            f = getattr(reply, "frequency", None)
+            logger.warning(
+                "status reply rejected: ssrc %s, output rate %s, frequency %s Hz; "
+                "expected ssrc %d, rate %d, frequency %.0f Hz (+-%.0f).  No anchor "
+                "or counter map forms from such replies (further rejections for "
+                "this ssrc not logged until one matches)",
+                getattr(reply, "ssrc", None), getattr(reply, "output_samprate", None),
+                "None" if f is None else f"{float(f):.0f}",
+                ssrc, rate, freq_hz, FREQ_TOL_HZ)
+        return False
+
+
+_REJECTS = _RejectLog()
+
+
 def gather_status(control, ssrc: int, n: int, *, rate: int, freq_hz: float,
                   gate: Callable[[int], bool], listen_s: float = LISTEN_S,
                   poll_timeout: float = POLL_TIMEOUT_S) -> list:
@@ -72,7 +110,7 @@ def gather_status(control, ssrc: int, n: int, *, rate: int, freq_hz: float,
     got: list = []
 
     def heard(st):
-        if len(got) < n and reply_matches(st, ssrc, rate, freq_hz):
+        if len(got) < n and _REJECTS.check(st, ssrc, rate, freq_hz):
             got.append(st)
 
     listen = getattr(control, "listen_status", None)
@@ -89,7 +127,7 @@ def gather_status(control, ssrc: int, n: int, *, rate: int, freq_hz: float,
         except Exception as exc:  # noqa: BLE001
             logger.debug("status poll of ssrc %d failed: %s", ssrc, exc)
             continue
-        if reply_matches(reply, ssrc, rate, freq_hz):
+        if _REJECTS.check(reply, ssrc, rate, freq_hz):
             got.append(reply)
     return got
 
@@ -136,9 +174,12 @@ class ChannelCounterMap:
         with self._lock:
             return POLLS_AT_START if len(self._polls) < MIN_AGREE else 1
 
-    def bind(self, ssrc: int) -> None:
-        """Follow this SSRC.  A new one (a re-keyed slot) starts the map over."""
+    def bind(self, ssrc: int, freq_hz: Optional[float] = None) -> None:
+        """Follow this SSRC (and the frequency its channel reports).  A new
+        SSRC (a re-keyed slot) starts the map over."""
         with self._lock:
+            if freq_hz:
+                self._freq = float(freq_hz)
             if ssrc == self._ssrc:
                 return
             self._ssrc = ssrc
@@ -153,7 +194,7 @@ class ChannelCounterMap:
 
     def add_reply(self, reply) -> None:
         """Learn from one reply, if it comes from the bound channel."""
-        if self._ssrc is None or not reply_matches(reply, self._ssrc, self._rate, self._freq):
+        if self._ssrc is None or not _REJECTS.check(reply, self._ssrc, self._rate, self._freq):
             return
         poll = counter_poll_from_reply(reply, self._rate)
         if poll is not None:
