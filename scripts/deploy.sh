@@ -72,6 +72,18 @@ fi
 
 # Step 4: editable install refresh
 ui_info "Refreshing editable install"
+# pip ignores [tool.uv.sources], and hamsci-dsp is not on PyPI: a venv that
+# lacks it gets the sibling checkout first, or the refresh below fails.
+if ! "$VENV_DIR/bin/python3" -c 'import hamsci_dsp' 2>/dev/null; then
+    if [[ -f /opt/git/sigmond/hamsci-dsp/pyproject.toml ]]; then
+        ui_info "hamsci-dsp missing from the venv -- installing the sibling checkout"
+        "$VENV_DIR/bin/pip" install -e /opt/git/sigmond/hamsci-dsp >/dev/null
+    else
+        ui_error "hamsci-dsp is in neither the venv nor /opt/git/sigmond/hamsci-dsp;"
+        ui_error "  run scripts/install.sh (it clones the sibling)"
+        exit 1
+    fi
+fi
 "$VENV_DIR/bin/pip" install -e "$REPO_SOURCE" >/dev/null
 
 # Post-install verify
