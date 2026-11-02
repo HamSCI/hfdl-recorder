@@ -58,9 +58,9 @@ A separate offline solver uses those rows to answer whether HFDL improves UTC re
   never blocks `on_samples`.
 - **Sending anything off the station.**  Timing rows and windows stay local, as hfdl-recorder's
   outputs do today.  We pull test data back by hand.
-- **Using the host clock for timing.**  Labels come from the RTP timestamp through
-  `ka9q.rtp_to_utc` and the hf-timestd authority offset, as codar-sounder labels its captures.
-  The host clock may only disambiguate the RTP wrap.
+- **Using the host clock for timing.**  Labels come from radiod's sample counters, never from
+  the host clock.  The host clock may only disambiguate the RTP wrap.  See "Changed after the
+  label gate" for the two labels each window carries.
 
 ## The signal (confirmed against dumphfdl 1.7 source)
 
@@ -96,8 +96,8 @@ A separate offline solver uses those rows to answer whether HFDL improves UTC re
 - The keeper narrows each window to one 3 kHz HFDL channel, at a few kS/s, before saving.  This
   stays a cheap mix-and-decimate.  If it ever costs measurable CPU on the host, the keeper saves
   the band's samples untouched and leaves the narrowing to the batch step.
-- Each saved window carries: ground station, frequency, frame index, k, the UTC of its first
-  sample with the label's source and offset, the band's sample rate, the decimation applied, and
+- Each saved window carries: ground station, frequency, frame index, k, both labels of its
+  first sample (see "Changed after the label gate"), the band's sample rate, the decimation applied, and
   the receiving station's timing tier at that moment (T6, T5, T4, T3 or T2).
 - Storage, rough: a full slot (2.4 s) at 6 kS/s complex64 holds about 115 kB.  At 2,700 frames
   a day, three ground stations and up to two live frequencies each, about 2 GB a day.  See
@@ -201,6 +201,32 @@ or fills hours WWV leaves empty.
   the full slot (pre-key through the last probe, about 2.4 s), which serves the multipath
   science: about 2 GB a day at 6 kS/s.  Keep five days on the station, and pull daily by a
   script on the devbox.
+
+## Changed after the label gate (Michael, 2 November 2026)
+
+The label gate failed as first written, and the cause turned out not to be the RTP origin
+regression.  On ND, UACNJ and WB6CXC-7, a probe channel labelled through `acquire_anchor_utc`
+disagreed with hf-timestd's channel by 0 to 6 ms, differently on every fresh channel (once
+253 ms), at correlation 0.99998 or better.  radiod reads the GPS clock when it builds a status
+packet but takes the RTP count from the last block, so a one-shot anchor inherits that packet's
+lateness.  Labelled instead through each channel's counter map (hamsci-dsp `CounterMap`: RTP to
+radiod's input-sample index, from the channel's own INPUT_SAMPLES and RTP_TIMESNAP), the same
+two channels agreed to 0.5 µs, with no filter-delay offset to correct.
+
+So each window carries two labels for its first sample:
+
+- **The counter label**: its radiod input-sample index (fractional), with the counter map that
+  produced it and the radiod run it belongs to.  Results get scored on this one.  hf-timestd
+  logs, every minute at all three stations, a registration in the same index space
+  (`t6_anchor_input_index`, `t6_anchor_utc_ns` in its T3 shadow minute rows).  The batch
+  analyser or the offline solver converts index to UTC with it; the station converts nothing
+  at millisecond grain.
+- **The status-pair label**: UTC through `acquire_anchor_utc`, as first planned.  Kept beside
+  the counter label as a record.  Their difference measures the status-path noise, window by
+  window, for free.
+
+The daily pull fetches hf-timestd's T3 shadow minute rows with the windows.  The per-channel
+label correction file from the label check no longer applies: the counter label needs none.
 
 ## Left to the builder
 

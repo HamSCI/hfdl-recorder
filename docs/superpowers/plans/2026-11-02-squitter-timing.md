@@ -18,7 +18,7 @@
 - No signal processing in `_on_samples` beyond a copy, a mix and a decimation; correlation never runs in the sample path.  Never block `_on_samples`: a full queue drops the window and counts the drop.
 - dumphfdl decoding and the airframes.io feed must behave exactly as before, with the feature on or off.
 - Off by default: `[timing_squitters] enabled = false`.
-- Labels from RTP via `hamsci_dsp.timing.acquire_anchor_utc` with the hf-timestd authority offset; the host clock only disambiguates the RTP wrap.
+- Two labels per window (spec, "Changed after the label gate", Michael 2026-11-02): the counter label (radiod input-sample index of the first saved sample, via the channel's own `hamsci_dsp.counter_map.CounterMap`) scores results; the status-pair label (`hamsci_dsp.timing.acquire_anchor_utc` with the hf-timestd authority offset) rides beside it as a record.  The host clock only disambiguates the RTP wrap.
 - Nothing leaves the station: sink rows written with `Writer.from_env(..., local=True)`; windows stay on disk.
 - Windows: from 30 ms before the nominal slot start to the slot's end (32/13 s); narrowed to one 3 kHz channel at 6000 S/s complex64.
 - Retention on the station: 5 days of windows.
@@ -139,8 +139,8 @@ Proves whether an HFDL channel's UTC label agrees with hf-timestd's labels on th
 **Interfaces:**
 - Consumes: `next_slot_starts`, `SLOT_S` (Task 3).
 - Config: `[timing_squitters] enabled = false`, `ground_stations = ["Riverhead, New York", "San Francisco, California", "Molokai, Hawaii"]`, `window_dir = "/var/lib/hfdl-recorder/squitters"`, `retention_days = 5`, `min_free_gb = 5`.
-- Produces: `WindowKeeper(band: HfdlBand, fs: int, out_dir: Path, ground_stations: list[str], anchor_fn: Callable[[int], AnchorUTC], max_queue: int = 8)` with `feed(samples: np.ndarray, rtp_start: int) -> None` (non-blocking), `note_squitter(spdu_frame: dict) -> None`, `stats() -> dict` (`saved`, `dropped_queue`, `dropped_disk`, `reanchors`).
-- Produces: window files `<out_dir>/<YYYYMMDD>/<gs_id>-<freq_khz>-<frame_index>.npz` holding `x` (complex64, 6000 S/s), and JSON metadata `t0_utc`, `nominal_utc`, `fs`, `freq_khz`, `gs_id`, `gs_name`, `frame_index`, `frame_offset`, `band`, `anchor_source`, `offset_ns`, `t_level_active`, `utc_sync`.
+- Produces: `WindowKeeper(band: HfdlBand, fs: int, out_dir: Path, ground_stations: list[str], anchor_fn: Callable[[int], AnchorUTC], counter_map_fn: Callable[[], CounterMap | None], max_queue: int = 8)` with `feed(samples: np.ndarray, rtp_start: int) -> None` (non-blocking), `note_squitter(spdu_frame: dict) -> None`, `stats() -> dict` (`saved`, `dropped_queue`, `dropped_disk`, `reanchors`).
+- Produces: window files `<out_dir>/<YYYYMMDD>/<gs_id>-<freq_khz>-<frame_index>.npz` holding `x` (complex64, 6000 S/s), and JSON metadata `t0_utc`, `nominal_utc`, `fs`, `freq_khz`, `gs_id`, `gs_name`, `frame_index`, `frame_offset`, `band`, `anchor_source`, `offset_ns`, `t_level_active`, `utc_sync`; and the counter label: `input_index0` (float, radiod input-sample index of the first saved sample), `input_samprate`, `counter_map` (`CounterMap.to_dict()`), `input_epoch_gps_s` (names the radiod run).  A window whose counter map is missing still saves, with `input_index0 = null`.
 
 - [ ] **Step 1: Write the failing tests** (synthetic stream fed in 20 ms blocks with RTP timestamps; `anchor_fn` a fake):
   - `test_window_starts_30ms_before_nominal`: the saved window's `t0_utc` = nominal − 0.030 within one output sample; length = round((0.030 + 32/13) × 6000).
@@ -152,7 +152,7 @@ Proves whether an HFDL channel's UTC label agrees with hf-timestd's labels on th
   - In `test_band_pipeline.py`, `test_dumphfdl_bytes_unchanged_with_keeper`: the CF32 bytes sent to dumphfdl stay identical with the keeper on and off.
   - In `test_config.py`, `test_timing_squitters_off_by_default`.
 - [ ] **Step 2: Run.**  Expected: FAIL.
-- [ ] **Step 3: Implement.**  Ring buffer per band holding about 3 s of samples in RTP space; `SlotClock(cadence_sec=32.0, sample_rate=fs)` anchored through `anchor_fn` (the daemon builds it from `acquire_anchor_utc` with an `AuthorityReader`).  The slot start at offset k sits at k × 32/13 s into the frame, generally between samples: keep the integer sample start and record the exact `t0_utc` of the first saved sample.  Mix to the channel (freq_khz × 1000 + 1440 − band centre), decimate to 6000 S/s with a short FIR, hand the result to a writer thread through a bounded queue.  Prune dated folders older than `retention_days` once an hour from the writer thread.
+- [ ] **Step 3: Implement.**  Ring buffer per band holding about 3 s of samples in RTP space; `SlotClock(cadence_sec=32.0, sample_rate=fs)` anchored through `anchor_fn` (the daemon builds it from `acquire_anchor_utc` with an `AuthorityReader`).  The counter label comes from `counter_map_fn`: the daemon keeps one `CounterMap` per band channel from that channel's own status (`RadiodControl.poll_status(ssrc)` → `CounterPoll`, as hf-timestd's `counter_map_probe.py` does: 5 polls at start, then one a minute, majority 3 of 5, roll forward, drop when stale or on a new radiod run), off the sample path.  Poll only the band's own live SSRC: on radiod a command to an unknown SSRC mints a channel.  The slot start at offset k sits at k × 32/13 s into the frame, generally between samples: keep the integer sample start and record the exact `t0_utc` of the first saved sample.  Mix to the channel (freq_khz × 1000 + 1440 − band centre), decimate to 6000 S/s with a short FIR, hand the result to a writer thread through a bounded queue.  Prune dated folders older than `retention_days` once an hour from the writer thread.
 - [ ] **Step 4: Run** the three test files.  Expected: PASS.  Run the whole suite: `uv run pytest tests/ -q --override-ini addopts=` (all pass).
 - [ ] **Step 5: Commit.**  `git commit -m "timing: keep labelled windows around expected squitters"`
 
@@ -164,13 +164,14 @@ Proves whether an HFDL channel's UTC label agrees with hf-timestd's labels on th
 - Test: `tests/test_batch.py`
 
 **Interfaces:**
-- Consumes: `time_squitter`, `Arrival` (Task 4); window files (Task 5); `label_corrections.toml` (Task 1).
+- Consumes: `time_squitter`, `Arrival` (Task 4); window files (Task 5); hf-timestd's T3 shadow minute rows (`/var/lib/timestd/t3_shadow/minutes-<YYYYMMDD>.jsonl`, fields `t6_anchor_input_index`, `t6_anchor_utc_ns`, `t3.counter_epoch_id`), read-only.
 - Produces: CLI `hfdl-recorder squitter-analyze --dir DIR [--since UTC] [--csv OUT]`, which skips windows already analysed (a `.done` marker beside each).
-- Produces: sink rows, table `squitter_timing`, mode `hfdl`, `local=True`, one per window: the window metadata plus every `Arrival` field.
+- Produces: sink rows, table `squitter_timing`, mode `hfdl`, `local=True`, one per window: the window metadata plus every `Arrival` field, plus `arrival_input_index` (the arrival in input-sample index) and `delay_counter_s` (arrival through hf-timestd's index registration nearest in time, minus nominal; null when no registration of the same radiod run lies within 120 s), and `label_diff_s` (status-pair label minus counter label at the window start: the status-path noise).
 
 - [ ] **Step 1: Write the failing tests.**
   - `test_rows_from_synthetic_windows`: three synthetic window files with known delays give three rows whose `delay_s` match ± 20 µs, through a fake writer factory.
-  - `test_label_correction_applied`: a `label_corrections.toml` with `lag_us = 250` lowers `delay_s` by 250 µs.
+  - `test_counter_delay_from_registration`: a synthetic minute row (index, UTC) and a window with known `input_index0` give `delay_counter_s` within 1 µs of the known delay; a registration from another radiod run, or older than 120 s, gives null.
+  - `test_label_diff_recorded`: a window whose status-pair label runs 2.3 ms late against its counter label gives `label_diff_s` = +0.0023.
   - `test_utc_sync_false_marked`: the row carries `excluded = "utc_sync_false"`.
   - `test_second_run_skips_done`: a rerun inserts nothing.
   - `test_writer_is_local`: the factory gets `local=True`.
@@ -194,7 +195,7 @@ Before the test week: find out whether hf-timestd keeps, at each station, a week
 ### Task 8: Deploy to the three test stations
 
 **Files:**
-- Create: `/home/mjh/hamsci/tasks/hfdl-timing/pull.sh` (devbox, not in the repo): rsync each station's `squitters/` and `squitter_timing` rows into `/home/mjh/hamsci/tasks/hfdl-timing/<station>/`; a user timer runs it daily at 12:30Z.
+- Create: `/home/mjh/hamsci/tasks/hfdl-timing/pull.sh` (devbox, not in the repo): rsync each station's `squitters/`, `squitter_timing` rows and `/var/lib/timestd/t3_shadow/` into `/home/mjh/hamsci/tasks/hfdl-timing/<station>/`; a user timer runs it daily at 12:30Z.
 
 - [ ] **Step 1:** Read the claude-bus; announce: hfdl-recorder install at UACNJ and WB6CXC-7, the timing feature at ND, UACNJ and WB6CXC-7, deployed by git.
 - [ ] **Step 2:** Choose bands per station from ND's decodes: the bands that carried Riverhead, San Francisco and Molokai squitters between 00:00 and 12:00Z on 11-02.  Two or three bands only.
@@ -209,7 +210,7 @@ Before the test week: find out whether hf-timestd keeps, at each station, a week
 - Create: `tools/squitter_eval.py` (repo; runs on the devbox only), `tests/test_squitter_eval.py`
 
 **Interfaces:**
-- Consumes: pulled `squitter_timing` rows and window metadata; Task 7's WWV inputs and reference readings.
+- Consumes: pulled `squitter_timing` rows and window metadata; Task 7's WWV inputs and reference readings.  Scores on `delay_counter_s`; reports `delay_s` (status-pair label) beside it, and the distribution of `label_diff_s` per station.
 - Produces: `squitter_eval.py report --data DIR --train-nights N --out report.md` with four sections: checks 1–4 as the spec defines them, plus the same-frame multi-frequency consistency (one ground station's squitter on two bands in the same frame must agree within the path dispersion, about 0.3 ms; a larger gap points at the labels).
 
 - [ ] **Step 1: Write the failing tests** on synthetic rows: a station offset of 1.234 ms with 0.2 ms scatter comes back within 0.05 ms (check 1); training and scoring nights never overlap (check 4); the reference column never enters the reconstruction (assert by poisoning the reference with NaN and getting the same reconstruction).
