@@ -86,9 +86,11 @@ def test_repeat_record_shape():
     rec = build_repeat_record(
         band="HFDL13", probe_fs=80000, ref_fs=12000, lag_s=1.5e-4,
         corr=0.97, anchor_source="rtp_to_utc+authority",
-        ref_source="rtp_to_utc", t_level_active="T3")
+        ref_source="rtp_to_utc", ref_encoding=4,
+        t_level_active="T3")
     assert list(rec) == ["band", "probe_fs", "ref_fs", "lag_us", "corr",
-                         "anchor_source", "ref_source", "t_level_active"]
+                         "anchor_source", "ref_source", "ref_encoding",
+                         "t_level_active"]
     assert rec["lag_us"] == pytest.approx(150.0)
     json.dumps(rec)
 
@@ -197,7 +199,7 @@ def _anchor(source, rtp=True):
 def _run(control, probe_ssrc, label_fn, monkeypatch):
     monkeypatch.setattr(lc, "_wait_gone", lambda *a, **k: None)
     ref = SimpleNamespace(ssrc=111, frequency=10e6, sample_rate=12000,
-                          multicast_address="239.1.1.1")
+                          multicast_address="239.1.1.1", encoding=4)
 
     def fake_stream(channel, on_samples):
         return _FakeStream(channel, on_samples)
@@ -236,3 +238,25 @@ def test_equal_ssrc_refuses_removal(monkeypatch):
     with pytest.raises(SystemExit):
         lc._remove_probe(control, 111, 111)
     assert not [c for c in control.calls if c[0] == "remove_channel"]
+
+
+def test_reference_encoding_guard(monkeypatch):
+    from ka9q import Encoding
+    with pytest.raises(SystemExit):
+        lc._check_ref_encoding(0, 111)
+    with pytest.raises(SystemExit):
+        lc._check_ref_encoding(Encoding.OPUS, 111)
+    assert lc._check_ref_encoding(Encoding.F32LE, 111) == 4
+    assert lc._check_ref_encoding(Encoding.S16BE, 111) == 2
+
+
+def test_find_reference_refuses_unknown_encoding(monkeypatch):
+    import ka9q
+    mk = lambda enc: SimpleNamespace(ssrc=1, frequency=10e6, preset="iq",
+                                     sample_rate=12000, encoding=enc,
+                                     multicast_address="239.1.1.1")
+    monkeypatch.setattr(ka9q, "discover_channels", lambda s: {1: mk(0)})
+    with pytest.raises(SystemExit):
+        lc._find_reference("radiod.local", 10e6, None)
+    monkeypatch.setattr(ka9q, "discover_channels", lambda s: {1: mk(4)})
+    assert lc._find_reference("radiod.local", 10e6, None).encoding == 4

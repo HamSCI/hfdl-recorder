@@ -113,7 +113,7 @@ def labelled_lag_seconds(ref: np.ndarray, ref_fs: int, ref_t0_utc: float,
 
 def build_repeat_record(*, band: str, probe_fs: int, ref_fs: int, lag_s: float,
                         corr: float, anchor_source: str,
-                        ref_source: str, t_level_active) -> dict:
+                        ref_source: str, ref_encoding: int, t_level_active) -> dict:
     """One JSON-able result per repeat (the `--json` output shape)."""
     return {
         "band": band,
@@ -123,6 +123,7 @@ def build_repeat_record(*, band: str, probe_fs: int, ref_fs: int, lag_s: float,
         "corr": corr,
         "anchor_source": anchor_source,
         "ref_source": ref_source,
+        "ref_encoding": ref_encoding,
         "t_level_active": t_level_active,
     }
 
@@ -164,6 +165,24 @@ def write_corrections(path: Path, records: list[dict]) -> None:
 
 # ---- radiod-facing code: thin, exercised only against a live radiod ----
 
+# Encodings whose payload ka9q's decoder turns into samples.  0 (status packet
+# omitted it) would silently decode as F32LE, so it is not accepted.
+def _decodable_encodings() -> frozenset:
+    from ka9q import Encoding
+    return frozenset({
+        Encoding.S16LE, Encoding.S16BE, Encoding.F32LE, Encoding.F32BE,
+        Encoding.F16LE, Encoding.F16BE, Encoding.MULAW, Encoding.ALAW})
+
+
+def _check_ref_encoding(enc: int, ssrc=None) -> int:
+    if enc not in _decodable_encodings():
+        raise SystemExit(
+            f"label-check: reference channel (SSRC {ssrc}) reports encoding "
+            f"{enc}, which is unknown or not decodable as samples; refusing "
+            f"to guess (0 would be parsed as F32LE)")
+    return int(enc)
+
+
 def _find_reference(status: str, freq_hz: float, ref_ssrc: int | None):
     from ka9q import discover_channels
 
@@ -178,6 +197,7 @@ def _find_reference(status: str, freq_hz: float, ref_ssrc: int | None):
         raise SystemExit(
             f"label-check: expected one iq channel at {freq_hz:.0f} Hz, "
             f"found {len(cands)}: {found}; pass --ref-ssrc to choose")
+    _check_ref_encoding(cands[0].encoding, cands[0].ssrc)
     return cands[0]
 
 
@@ -266,7 +286,9 @@ def _run_repeat(i, *, control, ref, band, seconds, reader, label_fn=_label,
     if probe_info.ssrc == ref.ssrc:
         raise SystemExit(
             f"label-check: probe SSRC {probe_info.ssrc} equals the reference "
-            f"SSRC; refusing to continue")
+            f"SSRC (the reference channel); refusing to continue.  The probe "
+            f"channel is left on radiod, because removing it would remove "
+            f"the reference")
     ok = False
     try:
         probe_ms.start()
@@ -295,7 +317,7 @@ def _run_repeat(i, *, control, ref, band, seconds, reader, label_fn=_label,
         return build_repeat_record(
             band=band.name, probe_fs=band.samprate_hz, ref_fs=ref_fs,
             lag_s=lag, corr=corr, anchor_source=a_probe.source,
-            ref_source=a_ref.source,
+            ref_source=a_ref.source, ref_encoding=int(ref.encoding),
             t_level_active=getattr(a_probe.snapshot, "t_level_active", None))
     finally:
         _wait_gone(control, probe_info.ssrc)
