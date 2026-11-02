@@ -39,6 +39,7 @@ def reply(block, *, r0=5_000, i0=10**12, epoch_gps=1.4e9, late_s=0.0,
 def _fresh_reject_log(monkeypatch):
     import hfdl_recorder.timing.channel_status as cs
     monkeypatch.setattr(cs, "_REJECTS", cs._RejectLog())
+    monkeypatch.setattr(cs, "_CONVERT_FAILS", cs._ConvertFailLog())
 
 
 def _cm(**kw):
@@ -216,3 +217,47 @@ def test_rejected_replies_logged_once_per_streak(caplog):
     cm.add_reply(reply(3, rate=12_000))
     cm.add_reply(reply(4, rate=12_000))
     assert len(caplog.records) == 3
+
+
+def _near_now_replies(lates, chain=None):
+    """Replies whose GPS time sits near the host clock, so the real
+    rtp_to_utc's wrap hint picks the same epoch."""
+    import time as _t
+    epoch = _t.time() - GPS_UNIX - 10**12 / F_IN
+    return epoch, [reply(b, epoch_gps=epoch, late_s=late)
+                   for b, late in enumerate(lates)]
+
+
+def test_least_late_anchor_through_real_rtp_to_utc():
+    """No fake: ka9q.rtp_to_utc reads every attribute a ChannelInfo has."""
+    epoch, reps = _near_now_replies([0.003, 0.001, 0.002])
+    ctl = _Control(replies=reps)
+    a = least_late_anchor(ctl, SSRC, 5_000, F_OUT, freq_hz=FREQ,
+                          gate=lambda s: True, n=3, listen_s=0)
+    assert a is not None and a.rtp_referenced
+    true_utc = epoch + 10**12 / F_IN + GPS_UNIX
+    assert a.utc == pytest.approx(true_utc + 0.001, abs=2e-6)
+    # A chain-delay correction from the band's ChannelInfo is applied, as
+    # rtp_to_utc applies it for a ChannelInfo.
+    epoch, reps = _near_now_replies([0.001])
+    b = least_late_anchor(_Control(replies=reps), SSRC, 5_000, F_OUT,
+                          freq_hz=FREQ, gate=lambda s: True, n=1, listen_s=0,
+                          chain_delay_correction_ns=250_000)
+    assert b.utc == pytest.approx(epoch + 10**12 / F_IN + GPS_UNIX + 0.001
+                                  - 250e-6, abs=2e-6)
+
+
+def test_conversion_failure_logged_once_per_streak(caplog):
+    caplog.set_level(logging.WARNING)
+
+    def broken(rtp, ch, wallclock_hint_sec=None):
+        raise AttributeError("no such attribute")
+
+    for _ in range(3):
+        a = least_late_anchor(_Control(replies=[reply(b) for b in range(5)]),
+                              SSRC, 5_000, F_OUT, freq_hz=FREQ,
+                              gate=lambda s: True, listen_s=0, rtp_to_utc=broken)
+        assert a is None
+    # Fifteen failed pairs, one line, none from hamsci_dsp's per-call path.
+    assert len(caplog.records) == 1
+    assert caplog.records[0].name == "hfdl_recorder.timing.channel_status"

@@ -148,3 +148,10 @@ def test_anchor_uses_channel_reported_frequency(tmp_path):
     finally:
         cs.gather_status = orig
     assert seen == [13_310_002.0, 13_310_002.0]     # anchor, then counter map
+
+
+def test_anchor_carries_channel_chain_delay(tmp_path):
+    rec, pipeline, multi = _built(tmp_path, 0x10)
+    assert pipeline.chain_delay_correction_ns is None
+    pipeline._on_stream_restored(SimpleNamespace(ssrc=0x10, chain_delay_correction_ns=1234))
+    assert pipeline.chain_delay_correction_ns == 1234

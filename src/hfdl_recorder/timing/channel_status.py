@@ -99,6 +99,33 @@ class _RejectLog:
 _REJECTS = _RejectLog()
 
 
+class _ConvertFailLog:
+    """rtp_to_utc raising on a status pair: logged once per streak per SSRC."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._bad: set = set()
+
+    def failed(self, ssrc: int, exc: Exception) -> None:
+        with self._lock:
+            first = ssrc not in self._bad
+            self._bad.add(ssrc)
+        if first:
+            logger.warning("rtp_to_utc failed on ssrc %d's status pair: %s; no "
+                           "anchor from it (further failures not logged until "
+                           "one converts)", ssrc, exc)
+
+    def ok(self, ssrc: int) -> None:
+        with self._lock:
+            if ssrc not in self._bad:
+                return
+            self._bad.discard(ssrc)
+        logger.info("rtp_to_utc converts ssrc %d's status pairs again", ssrc)
+
+
+_CONVERT_FAILS = _ConvertFailLog()
+
+
 def gather_status(control, ssrc: int, n: int, *, rate: int, freq_hz: float,
                   gate: Callable[[int], bool], listen_s: float = LISTEN_S,
                   poll_timeout: float = POLL_TIMEOUT_S) -> list:
@@ -276,11 +303,15 @@ class ChannelCounterMap:
 
 
 class _StatusPair:
-    """The (GPS_TIME, RTP_TIMESNAP) pair of one reply, shaped for rtp_to_utc."""
+    """The (GPS_TIME, RTP_TIMESNAP) pair of one reply, shaped like the
+    ChannelInfo that ka9q.rtp_to_utc reads: get_anchor(), sample_rate and
+    chain_delay_correction_ns (ChannelInfo defaults it to None)."""
 
-    def __init__(self, gps_time: int, rtp_timesnap: int, sample_rate: int):
+    def __init__(self, gps_time: int, rtp_timesnap: int, sample_rate: int,
+                 chain_delay_correction_ns: Optional[int] = None):
         self._pair = (gps_time, rtp_timesnap)
         self.sample_rate = sample_rate
+        self.chain_delay_correction_ns = chain_delay_correction_ns
 
     def get_anchor(self):
         return self._pair
@@ -290,12 +321,19 @@ def least_late_anchor(control, ssrc: int, rtp: int, sample_rate: int, *,
                       freq_hz: float, gate: Callable[[int], bool],
                       authority_reader=None, counter: Optional[ChannelCounterMap] = None,
                       n: int = ANCHOR_POLLS, listen_s: float = LISTEN_S,
-                      poll_timeout: float = POLL_TIMEOUT_S, rtp_to_utc=None):
+                      poll_timeout: float = POLL_TIMEOUT_S, rtp_to_utc=None,
+                      chain_delay_correction_ns: Optional[int] = None):
     """Anchor ``rtp`` through the least late of up to ``n`` status replies.
 
     Returns the AnchorUTC that puts ``rtp`` earliest, or None when no valid
     reply carried a status pair (never a host-clock fallback).  Each reply
     also feeds ``counter``, so a re-anchor relearns the counter map at once.
+
+    ``chain_delay_correction_ns`` comes from the band's ChannelInfo (None
+    unless something set it), as rtp_to_utc would see it there.  Each pair is
+    tried through rtp_to_utc here first: a pair it cannot convert is skipped
+    and logged once per streak, so acquire_anchor_utc's own per-call warning
+    never floods the journal.
     """
     from hamsci_dsp.timing import acquire_anchor_utc
     if rtp_to_utc is None:
@@ -316,8 +354,18 @@ def least_late_anchor(control, ssrc: int, rtp: int, sample_rate: int, *,
         gps, snap_rtp = getattr(reply, "gps_time", None), getattr(reply, "rtp_timesnap", None)
         if not gps or snap_rtp is None:
             continue
+        pair = _StatusPair(int(gps), int(snap_rtp), sample_rate,
+                           chain_delay_correction_ns)
+        try:
+            ok = rtp_to_utc(int(rtp) & 0xFFFFFFFF, pair) is not None
+        except Exception as exc:  # noqa: BLE001
+            _CONVERT_FAILS.failed(ssrc, exc)
+            continue
+        if not ok:
+            continue
+        _CONVERT_FAILS.ok(ssrc)
         a = acquire_anchor_utc(
-            first_rtp=rtp, channel_info=_StatusPair(int(gps), int(snap_rtp), sample_rate),
+            first_rtp=rtp, channel_info=pair,
             rtp_to_utc=rtp_to_utc, snapshot=snapshot, sample_rate=sample_rate)
         if not a.rtp_referenced:
             continue

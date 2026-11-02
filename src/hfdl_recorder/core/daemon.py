@@ -237,7 +237,8 @@ class HfdlRecorder:
             counter.bind(live, freq)
             return least_late_anchor(
                 control, live, rtp, band.samprate_hz, freq_hz=freq,
-                gate=pipeline.may_poll, authority_reader=reader, counter=counter)
+                gate=pipeline.may_poll, authority_reader=reader, counter=counter,
+                chain_delay_correction_ns=pipeline.chain_delay_correction_ns)
 
         def tier_fn():
             snap = reader.read()

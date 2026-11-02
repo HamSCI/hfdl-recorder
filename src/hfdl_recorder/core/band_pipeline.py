@@ -72,6 +72,7 @@ class BandPipeline:
         # The frequency the channel reports (ChannelInfo), which status
         # replies must match; band.center_hz until a ChannelInfo says.
         self._channel_freq_hz: float = float(band.center_hz)
+        self._chain_delay_ns: int | None = None
         self._dropped = False
         self._last_sample_mono = 0.0
 
@@ -120,7 +121,15 @@ class BandPipeline:
     def channel_freq_hz(self) -> float:
         return self._channel_freq_hz
 
+    @property
+    def chain_delay_correction_ns(self) -> int | None:
+        """The ChannelInfo's chain-delay correction (None unless set), which
+        ka9q.rtp_to_utc subtracts; the anchor's status pairs carry it too."""
+        return self._chain_delay_ns
+
     def _note_channel_freq(self, info) -> None:
+        cd = getattr(info, "chain_delay_correction_ns", None)
+        self._chain_delay_ns = cd if isinstance(cd, int) and not isinstance(cd, bool) else None
         f = getattr(info, "frequency", None)
         # 0, None or anything not a number: radiod did not say.
         if isinstance(f, (int, float)) and not isinstance(f, bool) and f > 0:
