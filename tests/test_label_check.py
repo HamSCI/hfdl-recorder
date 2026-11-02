@@ -142,15 +142,23 @@ from hfdl_recorder.timing import label_check as lc
 
 
 class _FakeControl:
-    def __init__(self):
+    """Fake RadiodControl.  `present` = SSRCs radiod still answers for."""
+
+    def __init__(self, present=(), reap_works=True):
         self.calls = []
+        self.present = set(present)
+        self.reap_works = reap_works
 
     def remove_channel(self, ssrc):
         self.calls.append(("remove_channel", ssrc))
 
+    def set_channel_lifetime(self, ssrc, n):
+        self.calls.append(("set_channel_lifetime", ssrc, n))
+        if n == 1 and self.reap_works:
+            self.present.discard(ssrc)
+
     def poll_channel(self, ssrc, **kw):
-        self.calls.append(("poll_channel", ssrc))
-        return None
+        return object() if ssrc in self.present else None
 
     def __getattr__(self, name):          # any other call is recorded loudly
         def rec(*a, **kw):
@@ -173,18 +181,23 @@ class _FakeStream:
         pass
 
 
-def _fake_multi(probe_ssrc):
+def _fake_multi(control, probe_ssrc, created):
     class FakeMulti:
         def __init__(self, control):
             self.control = control
 
         def add_channel(self, **kw):
             self.cb = kw["on_samples"]
+            created.append(kw)
+            self.control.present.add(probe_ssrc)
             return SimpleNamespace(ssrc=probe_ssrc)
 
         def start(self):
             self.cb(np.ones(self.cb.n_target, dtype=np.complex64),
                     SimpleNamespace(delivered_rtp_start=1))
+
+        def set_channel_lifetime(self, ssrc, n):
+            self.control.calls.append(("keepalive", ssrc, n))
 
         def stop(self):
             pass
@@ -196,8 +209,11 @@ def _anchor(source, rtp=True):
                            snapshot=SimpleNamespace(t_level_active="T3"))
 
 
-def _run(control, probe_ssrc, label_fn, monkeypatch):
-    monkeypatch.setattr(lc, "_wait_gone", lambda *a, **k: None)
+def _run(control, probe_ssrc, label_fn, monkeypatch, created=None):
+    created = [] if created is None else created
+    monkeypatch.setattr(lc, "_probe_ssrc", lambda *a: probe_ssrc)
+    monkeypatch.setattr(lc, "REAP_TIMEOUT_SEC", 0.0)
+    monkeypatch.setattr(lc.time, "sleep", lambda s: None)
     ref = SimpleNamespace(ssrc=111, frequency=10e6, sample_rate=12000,
                           multicast_address="239.1.1.1", encoding=4)
 
@@ -206,7 +222,7 @@ def _run(control, probe_ssrc, label_fn, monkeypatch):
     return lc._run_repeat(
         0, control=control, ref=ref, band=HFDL_BANDS["HFDL13"], seconds=0.01,
         reader=None, label_fn=label_fn, ref_stream_cls=fake_stream,
-        multi_cls=_fake_multi(probe_ssrc))
+        multi_cls=_fake_multi(control, probe_ssrc, created))
 
 
 def test_reference_path_never_creates_modifies_or_removes(monkeypatch):
@@ -215,8 +231,49 @@ def test_reference_path_never_creates_modifies_or_removes(monkeypatch):
     rec = _run(control, 222, lambda *a: _anchor("rtp_to_utc"), monkeypatch)
     assert rec["ref_source"] == "rtp_to_utc"
     assert rec["lag_us"] == pytest.approx(100.0)
-    # Only the probe SSRC is ever touched, and only by removal.
-    assert control.calls == [("remove_channel", 222)]
+    # Only the probe SSRC is ever touched; reference SSRC 111 never.
+    assert control.calls == [("set_channel_lifetime", 222, 1)]
+
+
+def test_probe_created_with_finite_lifetime(monkeypatch):
+    created = []
+    monkeypatch.setattr(lc, "labelled_lag_seconds", lambda *a: (1e-4, 0.9))
+    _run(_FakeControl(), 222, lambda *a: _anchor("rtp_to_utc"), monkeypatch,
+         created)
+    assert created[0]["lifetime"] == lc.PROBE_LIFETIME_FRAMES > 0
+
+
+def test_removal_sends_lifetime_one(monkeypatch):
+    control = _FakeControl(present={222})
+    assert lc._reap_probe(control, 222, 111) is True
+    assert ("set_channel_lifetime", 222, 1) in control.calls
+
+
+def test_probe_still_present_fails_the_repeat(monkeypatch, capsys):
+    control = _FakeControl(reap_works=False)
+    monkeypatch.setattr(lc, "labelled_lag_seconds", lambda *a: (1e-4, 0.9))
+    rec = _run(control, 222, lambda *a: _anchor("rtp_to_utc"), monkeypatch)
+    assert rec is None
+    assert "still present" in capsys.readouterr().err
+
+
+def test_preexisting_probe_is_reaped_before_creation(monkeypatch):
+    control = _FakeControl(present={222})
+    created = []
+    monkeypatch.setattr(lc, "labelled_lag_seconds", lambda *a: (1e-4, 0.9))
+    rec = _run(control, 222, lambda *a: _anchor("rtp_to_utc"), monkeypatch,
+               created)
+    assert rec is not None
+    assert control.calls[0] == ("set_channel_lifetime", 222, 1)
+    assert len(created) == 1
+
+
+def test_stale_probe_that_will_not_die_fails_before_creation(monkeypatch):
+    control = _FakeControl(present={222}, reap_works=False)
+    created = []
+    rec = _run(control, 222, lambda *a: _anchor("rtp_to_utc"), monkeypatch,
+               created)
+    assert rec is None and created == []
 
 
 def test_wallclock_anchor_drops_the_repeat(monkeypatch, capsys):
@@ -234,10 +291,10 @@ def test_equal_ssrc_refuses_removal(monkeypatch):
     control = _FakeControl()
     with pytest.raises(SystemExit):
         _run(control, 111, lambda *a: _anchor("rtp_to_utc"), monkeypatch)
-    assert not [c for c in control.calls if c[0] == "remove_channel"]
+    assert not control.calls
     with pytest.raises(SystemExit):
-        lc._remove_probe(control, 111, 111)
-    assert not [c for c in control.calls if c[0] == "remove_channel"]
+        lc._reap_probe(control, 111, 111)
+    assert not control.calls
 
 
 def test_reference_encoding_guard(monkeypatch):

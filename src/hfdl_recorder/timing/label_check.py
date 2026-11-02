@@ -236,14 +236,33 @@ def _label(collector, info, rate, authority_reader):
     return a
 
 
-def _wait_gone(control, ssrc: int, timeout: float = 90.0) -> None:
-    """Wait until radiod no longer answers for a removed SSRC."""
+# The probe lives on a finite lifetime so a crash leaves a short orphan, and a
+# keep-alive (a command carrying LIFETIME; bare polls do not refresh) runs
+# during capture.  Removal sets lifetime 1: radiod reaps a channel only when
+# its lifetime runs out, so a 0 Hz "removed" channel with lifetime 0
+# (infinite) never goes away and the next repeat would be handed it back.
+PROBE_LIFETIME_FRAMES = 1000        # ~20 s at 50 frames/s
+KEEPALIVE_SEC = 3.0
+REAP_TIMEOUT_SEC = 30.0
+
+
+def _gone(control, ssrc: int) -> bool:
+    return control.poll_channel(ssrc, timeout=1.0, allow_idle=True) is None
+
+
+def _wait_gone(control, ssrc: int, timeout: float | None = None) -> bool:
+    """Wait until radiod no longer answers for ``ssrc``; False on timeout."""
+    if timeout is None:
+        timeout = REAP_TIMEOUT_SEC
     t_end = time.time() + timeout
-    while time.time() < t_end:
-        if control.poll_channel(ssrc, timeout=1.0, allow_idle=True) is None:
-            return
-        time.sleep(2.0)
-    logger.warning("probe SSRC %d still answering after %.0f s", ssrc, timeout)
+    while True:
+        if _gone(control, ssrc):
+            return True
+        if time.time() >= t_end:
+            logger.error("probe SSRC %d still answering after %.0f s",
+                         ssrc, timeout)
+            return False
+        time.sleep(1.0)
 
 
 def _rtp_labelled(anchor) -> bool:
@@ -251,13 +270,37 @@ def _rtp_labelled(anchor) -> bool:
     return bool(anchor.rtp_referenced) and anchor.source.startswith("rtp_to_utc")
 
 
-def _remove_probe(control, probe_ssrc: int, ref_ssrc: int) -> None:
-    """Remove our probe channel; never, under any mix-up, hf-timestd's."""
+def _reap_probe(control, probe_ssrc: int, ref_ssrc: int) -> bool:
+    """Reap our probe channel (lifetime 1, then wait); never hf-timestd's.
+
+    Returns True once radiod no longer answers for the SSRC.
+    """
     if probe_ssrc == ref_ssrc:
         raise SystemExit(
             f"label-check: probe SSRC {probe_ssrc} equals the reference "
             f"SSRC; refusing to remove hf-timestd's channel")
-    control.remove_channel(probe_ssrc)
+    control.set_channel_lifetime(probe_ssrc, 1)
+    return _wait_gone(control, probe_ssrc)
+
+
+def _probe_ssrc(control, freq_hz: float, band) -> int:
+    """The SSRC ensure_channel will give the probe (a hash of its params)."""
+    from ka9q import allocate_ssrc
+
+    from hfdl_recorder.core.radiod import HFDL_ENCODING, HFDL_PRESET
+    return allocate_ssrc(
+        frequency_hz=freq_hz, preset=HFDL_PRESET,
+        sample_rate=band.samprate_hz, agc=False, gain=0.0,
+        destination=control._derive_client_destination(),
+        encoding=HFDL_ENCODING, radiod_host=control.status_address)
+
+
+def _keepalive(multi, ssrc: int, stop: threading.Event) -> None:
+    while not stop.wait(KEEPALIVE_SEC):
+        try:
+            multi.set_channel_lifetime(ssrc, PROBE_LIFETIME_FRAMES)
+        except Exception:  # noqa: BLE001 - the capture will time out instead
+            logger.exception("probe keep-alive failed")
 
 
 def _run_repeat(i, *, control, ref, band, seconds, reader, label_fn=_label,
@@ -274,6 +317,20 @@ def _run_repeat(i, *, control, ref, band, seconds, reader, label_fn=_label,
         from ka9q import MultiStream as multi_cls
     from hfdl_recorder.core.radiod import HFDL_ENCODING, HFDL_PRESET
 
+    # A probe left from an earlier run would be handed back by ensure_channel
+    # (same SSRC): no fresh RTP origin.  Reap it before creating.
+    want = _probe_ssrc(control, float(ref.frequency), band)
+    if want == ref.ssrc:
+        raise SystemExit(
+            f"label-check: probe SSRC {want} equals the reference SSRC; "
+            f"refusing to continue")
+    if not _gone(control, want):
+        logger.warning("probe SSRC %d already present; reaping it", want)
+        if not _reap_probe(control, want, ref.ssrc):
+            print(f"label-check: repeat {i}: stale probe {want} would not "
+                  f"go away; repeat failed", file=sys.stderr)
+            return None
+
     ref_fs = int(ref.sample_rate)
     ref_c = _Collector(int(seconds * ref_fs))
     probe_c = _Collector(int(seconds * band.samprate_hz))
@@ -282,7 +339,7 @@ def _run_repeat(i, *, control, ref, band, seconds, reader, label_fn=_label,
     probe_info = probe_ms.add_channel(
         frequency_hz=float(ref.frequency), preset=HFDL_PRESET,
         sample_rate=band.samprate_hz, encoding=HFDL_ENCODING,
-        on_samples=probe_c)
+        on_samples=probe_c, lifetime=PROBE_LIFETIME_FRAMES)
     if probe_info.ssrc == ref.ssrc:
         raise SystemExit(
             f"label-check: probe SSRC {probe_info.ssrc} equals the reference "
@@ -290,37 +347,45 @@ def _run_repeat(i, *, control, ref, band, seconds, reader, label_fn=_label,
             f"channel is left on radiod, because removing it would remove "
             f"the reference")
     ok = False
+    stop_ka = threading.Event()
+    ka = threading.Thread(target=_keepalive,
+                          args=(probe_ms, probe_info.ssrc, stop_ka),
+                          daemon=True)
     try:
+        ka.start()
         probe_ms.start()
         ref_stream.start()
         limit = seconds + 30
         ok = probe_c.done.wait(limit) and ref_c.done.wait(limit)
     finally:
+        stop_ka.set()
         ref_stream.stop()
         probe_ms.stop()
-        _remove_probe(control, probe_info.ssrc, ref.ssrc)
-    try:
-        if not ok:
-            print(f"label-check: repeat {i}: capture timed out",
-                  file=sys.stderr)
-            return None
-        a_ref = label_fn(ref_c, ref, ref_fs, reader)
-        a_probe = label_fn(probe_c, probe_info, band.samprate_hz, reader)
-        if not (_rtp_labelled(a_ref) and _rtp_labelled(a_probe)):
-            print(f"label-check: repeat {i}: DROPPED, label not RTP-derived "
-                  f"(ref {a_ref.source}, probe {a_probe.source}); a "
-                  f"wall-clock lag is meaningless", file=sys.stderr)
-            return None
-        lag, corr = labelled_lag_seconds(
-            ref_c.samples(), ref_fs, a_ref.utc,
-            probe_c.samples(), band.samprate_hz, a_probe.utc)
-        return build_repeat_record(
-            band=band.name, probe_fs=band.samprate_hz, ref_fs=ref_fs,
-            lag_s=lag, corr=corr, anchor_source=a_probe.source,
-            ref_source=a_ref.source, ref_encoding=int(ref.encoding),
-            t_level_active=getattr(a_probe.snapshot, "t_level_active", None))
-    finally:
-        _wait_gone(control, probe_info.ssrc)
+        reaped = _reap_probe(control, probe_info.ssrc, ref.ssrc)
+    if not reaped:
+        print(f"label-check: repeat {i}: probe {probe_info.ssrc} still "
+              f"present after {REAP_TIMEOUT_SEC:.0f} s; repeat failed (a "
+              f"live probe would be reused with its old RTP origin)",
+              file=sys.stderr)
+        return None
+    if not ok:
+        print(f"label-check: repeat {i}: capture timed out", file=sys.stderr)
+        return None
+    a_ref = label_fn(ref_c, ref, ref_fs, reader)
+    a_probe = label_fn(probe_c, probe_info, band.samprate_hz, reader)
+    if not (_rtp_labelled(a_ref) and _rtp_labelled(a_probe)):
+        print(f"label-check: repeat {i}: DROPPED, label not RTP-derived "
+              f"(ref {a_ref.source}, probe {a_probe.source}); a "
+              f"wall-clock lag is meaningless", file=sys.stderr)
+        return None
+    lag, corr = labelled_lag_seconds(
+        ref_c.samples(), ref_fs, a_ref.utc,
+        probe_c.samples(), band.samprate_hz, a_probe.utc)
+    return build_repeat_record(
+        band=band.name, probe_fs=band.samprate_hz, ref_fs=ref_fs,
+        lag_s=lag, corr=corr, anchor_source=a_probe.source,
+        ref_source=a_ref.source, ref_encoding=int(ref.encoding),
+        t_level_active=getattr(a_probe.snapshot, "t_level_active", None))
 
 
 def run_label_check(args) -> int:
