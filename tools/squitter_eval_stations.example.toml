@@ -5,25 +5,35 @@
 #   grid / lat+lon   receiver location, for the great-circle prior (checks 1, 3).
 #                    Without one the reconstruction still runs; checks 1 and 3
 #                    skip the station.
-#   reference        tiers to score against, first available wins:
-#                    T6 = t6_offset_ms, T4 = t4_offset_ms, T5 = -t5_vs_adopted.
+#   reference        what scores the T6 anchor plane the counter label lives in,
+#                    first available wins: T6 = t6_offset_ms; T5 = -t5_vs_adopted,
+#                    counted only while vs_tier names T6.  T4 measures the host
+#                    clock, not the plane, and the tool refuses it here.
+#   cross_check      tiers shown beside the plane's error (T4, T5).
 #   hide_reference   true: the reference never trains the nuisances either;
 #                    the station stands in for one without GPS.
 #   require_adopted  score only minutes whose adopted tier (vs_tier) is listed.
+#   night_hours      [lo, hi] UTC hours for this station's aggregates (may wrap);
+#                    default --overnight.
 #   input_samprate   radiod input rate, Hz; default: the median of the rows'.
 #
 # Grids come from ops/fleet.toml comments where it gives one.  Never guess one.
 
 [stations.AC0G-ND]
 grid = "TODO"            # TODO: ND's grid is not in ops/fleet.toml; fill from the station
-reference = ["T4"]       # LAN stratum-1, about 0.2 ms
-hide_reference = true    # spec: hide T4 from the reconstruction, score only
+reference = ["T6"]       # the anchor plane's own error, if ND's rows carry a T6 anchor
+cross_check = ["T4"]     # LAN stratum-1, about 0.2 ms: host clock beside the plane
+hide_reference = true    # spec: hide the reference from the reconstruction, score only
+night_hours = [2, 12]    # TODO: check against ND's decodes
 
 [stations.UACNJ]
 grid = "FN20mv"          # ops/fleet.toml: "UACNJ / DASI-010, RAC 230, grid FN20mv"
 reference = ["T6", "T5"]
+cross_check = ["T5"]
+night_hours = [0, 10]    # local night, roughly; TODO: check against decodes
 
 [stations.WB6CXC-7]
 grid = "CN88ll"          # ops/fleet.toml: "WB6CXC-7 (Paul Elliott, WA, grid CN88ll)"
 reference = ["T6", "T5"]
 require_adopted = ["T6", "T5"]   # spec: scores only while it holds T6 or T5
+night_hours = [4, 14]    # local night ~04-14Z (reviewer)
