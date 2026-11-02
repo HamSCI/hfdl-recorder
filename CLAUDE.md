@@ -104,6 +104,13 @@ src/hfdl_recorder/
     ch_tailer.py      # ChTailer: tails per-band JSON spool → hfdl.spots
     feed.py           # build dumphfdl --output argv from [sinks]
     radiod.py         # ensure_channel() wrapper
+  timing/             # squitter timing (off by default: [timing_squitters])
+    frame_grid.py     # HFDL frame/slot grid on UTC
+    waveform.py       # HFDL waveform constants, synthetic squitters
+    analyzer.py       # batch: time one saved squitter window
+    label_check.py    # label-check CLI (probe channel vs hf-timestd)
+    window_keeper.py  # live: saves labelled 6 kS/s windows around squitters
+    channel_status.py # band channel's counter map + least-late anchor
 tests/
   test_contract.py
   test_config.py

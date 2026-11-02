@@ -79,3 +79,32 @@ def test_resolve_radiod_status_missing_raises():
     """Phase 6: a block without `status` is rejected, not back-filled."""
     with pytest.raises(ValueError):
         resolve_radiod_status({})
+
+
+def test_timing_squitters_off_by_default():
+    cfg = load_config(FIXTURE)
+    ts = cfg["timing_squitters"]
+    assert ts["enabled"] is False
+    assert ts["ground_stations"] == [
+        "Riverhead, New York", "San Francisco, California", "Molokai, Hawaii"]
+    assert ts["window_dir"] == "/var/lib/hfdl-recorder/squitters"
+    assert ts["retention_days"] == 5
+    assert ts["min_free_gb"] == 5
+
+
+def test_timing_squitters_template_matches_defaults():
+    from hfdl_recorder.config import tomllib
+    tpl = Path(__file__).parent.parent / "config" / "hfdl-recorder-config.toml.template"
+    with open(tpl, "rb") as f:
+        raw = tomllib.load(f)
+    ts = raw["timing_squitters"]
+    assert ts["enabled"] is False
+    assert ts["ground_stations"] == [
+        "Riverhead, New York", "San Francisco, California", "Molokai, Hawaii"]
+
+
+def test_timing_squitters_rejects_bad_values(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text(FIXTURE.read_text() + "\n[timing_squitters]\nretention_days = -1\n")
+    with pytest.raises(ValueError):
+        load_config(p)

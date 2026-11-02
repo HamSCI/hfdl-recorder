@@ -32,6 +32,20 @@ airframes_io = false  # opt-in: TCP push to feed.airframes.io:5556
 # [timing]
 # chain_delay_ns = 0
 
+# Squitter timing windows.  Off by default.  When on, each enabled band keeps
+# short labelled IQ windows (6 kS/s, about 120 kB each) around the chosen
+# ground stations' squitters, for the batch timing analyser.  The windows stay
+# on this station; dumphfdl decoding and the airframes.io feed run exactly as
+# they do with this off.  Expect about 2 GB a day; saving stops (decoding
+# does not) when free space falls below min_free_gb.
+[timing_squitters]
+enabled = false
+# Names exactly as dumphfdl reports them (spdu.src.name).
+ground_stations = ["Riverhead, New York", "San Francisco, California", "Molokai, Hawaii"]
+window_dir = "/var/lib/hfdl-recorder/squitters"
+retention_days = 5
+min_free_gb = 5
+
 [[radiod]]
 # REQUIRED: the mDNS control/status multicast name of the radiod to
 # consume from.  Discover available radiods on the LAN with:

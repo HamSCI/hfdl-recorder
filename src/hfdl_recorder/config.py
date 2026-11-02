@@ -99,6 +99,22 @@ DEFAULTS: dict[str, Any] = {
         # default).
         "radiod_lifetime_frames": 6000,
     },
+    # Squitter timing windows (docs/superpowers/specs/
+    # 2026-11-02-squitter-timing-design.md).  Off by default.  When on, each
+    # band keeps labelled IQ windows around the chosen ground stations'
+    # squitters, for the batch analyser.  Nothing leaves the station.
+    "timing_squitters": {
+        "enabled": False,
+        # Names exactly as dumphfdl reports them in spdu.src.name.
+        "ground_stations": [
+            "Riverhead, New York",
+            "San Francisco, California",
+            "Molokai, Hawaii",
+        ],
+        "window_dir": "/var/lib/hfdl-recorder/squitters",
+        "retention_days": 5,
+        "min_free_gb": 5,
+    },
 }
 
 # Encoding integer matches ka9q-python's Encoding enum (s16be = 2). The
@@ -130,6 +146,12 @@ def load_config(path: Path | None = None) -> dict:
     for key, val in DEFAULTS["processing"].items():
         raw["processing"].setdefault(key, val)
 
+    raw.setdefault("timing_squitters", {})
+    for key, val in DEFAULTS["timing_squitters"].items():
+        raw["timing_squitters"].setdefault(
+            key, list(val) if isinstance(val, list) else val)
+    _check_timing_squitters(raw["timing_squitters"])
+
     lifetime = raw["processing"]["radiod_lifetime_frames"]
     if not isinstance(lifetime, int) or lifetime < 0:
         raise ValueError(
@@ -138,6 +160,23 @@ def load_config(path: Path | None = None) -> dict:
         )
 
     return raw
+
+
+def _check_timing_squitters(ts: dict) -> None:
+    if not isinstance(ts["enabled"], bool):
+        raise ValueError(f"timing_squitters.enabled must be true or false; got {ts['enabled']!r}")
+    gs = ts["ground_stations"]
+    if not isinstance(gs, list) or not all(isinstance(g, str) and g for g in gs):
+        raise ValueError("timing_squitters.ground_stations must be a list of "
+                         f"ground-station names; got {gs!r}")
+    days = ts["retention_days"]
+    if not isinstance(days, int) or isinstance(days, bool) or days < 1:
+        raise ValueError(f"timing_squitters.retention_days must be an int >= 1; got {days!r}")
+    gb = ts["min_free_gb"]
+    if not isinstance(gb, (int, float)) or isinstance(gb, bool) or gb < 0:
+        raise ValueError(f"timing_squitters.min_free_gb must be a number >= 0; got {gb!r}")
+    if not isinstance(ts["window_dir"], str) or not ts["window_dir"]:
+        raise ValueError("timing_squitters.window_dir must be a path")
 
 
 # Default HFDL band selection used for synthesized [[radiod]] blocks
