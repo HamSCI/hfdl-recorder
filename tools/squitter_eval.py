@@ -81,7 +81,10 @@ HOUR_COVERAGE = 0.5               # an hour counts usable at this fraction of it
 EPOCH_TOL_S = 2.0                 # anchor-implied radiod epoch vs the rows' (batch.py)
 _GPS_UNIX_S = 315_964_800
 _GPS_LEAP_S = 18
-EXCLUDING_FLAGS = ("unresolved_multipath", "prekey_edge_mismatch")
+# Analyser flags that keep a row out of every fit.  None today: on real data
+# unresolved_multipath marks the strongest windows, so it is report-only.
+EXCLUDING_FLAGS: tuple = ()
+REPORT_FLAGS = ("unresolved_multipath",)   # counted as flagged_kept:<flag>, rows kept
 HFDL_ARMS = ("wwv", "wwv+hfdl")
 
 # HFDL ground stations, id -> (name, lat, lon).  Source: the HFDL system
@@ -129,6 +132,7 @@ class StationCfg:
     require_adopted: list = field(default_factory=list)
     night_hours: Optional[tuple] = None
     input_samprate: Optional[float] = None
+    night_start_hour: Optional[int] = None     # this station's night boundary, UTC
 
 
 def grid_to_latlon(grid) -> Optional[tuple]:
@@ -188,8 +192,22 @@ def load_stations(path) -> dict:
             require_adopted=list(s.get("require_adopted", [])),
             night_hours=(int(nh[0]), int(nh[1])) if nh else None,
             input_samprate=(float(s["input_samprate"])
-                            if s.get("input_samprate") else None))
+                            if s.get("input_samprate") else None),
+            night_start_hour=(int(s["night_start_hour"])
+                              if s.get("night_start_hour") is not None else None))
     return out
+
+
+def station_night_hour(cfg: StationCfg, default: int = 12) -> int:
+    """The station's night boundary: night_start_hour when set; else the
+    default, unless the station's night window straddles it, when the
+    boundary moves to the window's end so one window stays one night."""
+    if cfg.night_start_hour is not None:
+        return int(cfg.night_start_hour) % 24
+    w = cfg.night_hours
+    if w and w[0] != w[1] and _in_hours(default, w) and default != w[0]:
+        return int(w[1]) % 24
+    return default
 
 
 # ------------------------------------------------------------------ loading
@@ -202,7 +220,8 @@ class StationData:
 
 
 _BOOL = {"found", "utc_sync"}
-_INT = {"gs_id", "freq_khz", "frame_index", "frame_offset", "m1_shift"}
+_INT = {"gs_id", "freq_khz", "frame_index", "frame_offset", "m1_shift",
+        "analyzer_version"}
 _STR = {"flags", "excluded", "band", "gs_name", "reason", "radiod_id",
         "window_file", "t_level_active", "anchor_source", "anchor_id",
         "counter_map", "decimation"}
@@ -427,9 +446,13 @@ def _row_epochs(sd: StationData) -> list:
 def _anchor_series(sd: StationData, f_in=None, epochs=(), counts=None) -> dict:
     """minute -> (anchor_utc_ns, anchor_input_index) from the minute rows.
 
-    With the input rate and the rows' radiod runs known, an anchor whose
-    implied epoch (anchor UTC - index / f_in) matches none of them belongs to
-    another run and drops out (batch.py's time-consistency match)."""
+    The anchor and the broadcast's ``arrival_input_index`` come from one
+    minute row of one hf-timestd, so they share a radiod run by
+    construction (a restart inside the minute shows as
+    ``wwv_index_off_minute``).  The anchors therefore name their own runs
+    and all stay.  With the HFDL rows' runs known, an anchor whose implied
+    epoch (anchor UTC - index / f_in) matches none of them gets counted as
+    ``anchor_run_without_hfdl_rows``: WWV minutes with no HFDL beside them."""
     out = {}
     for m in sd.minutes:
         blk = m.get("t3_shadow")
@@ -443,8 +466,7 @@ def _anchor_series(sd: StationData, f_in=None, epochs=(), counts=None) -> dict:
             implied = int(ns) / 1e9 - idx / f_in
             if min(abs(implied - e) for e in epochs) > EPOCH_TOL_S:
                 if counts is not None:
-                    counts["anchor_other_run"] += 1
-                continue
+                    counts["anchor_run_without_hfdl_rows"] += 1
         out[_minute(t)] = (int(ns), idx)
     return out
 
@@ -464,10 +486,33 @@ def _exclusion_reasons(r) -> list:
     return out
 
 
+def _latest_analysis(rows, counts) -> list:
+    """One row per window: the newest analyser's (``analyzer_version``; a
+    row without one came from version 1).  Rows naming no window stay."""
+    best = {}
+    out = []
+    for r in rows:
+        key = (r.get("radiod_id"), r.get("window_file"))
+        if key[1] is None:
+            out.append(r)
+            continue
+        v = r.get("analyzer_version") or 1
+        if key in best:
+            counts["superseded_analysis"] += 1
+            if v <= (best[key].get("analyzer_version") or 1):
+                continue
+        best[key] = r
+    return out + list(best.values())
+
+
 def _usable_rows(sd: StationData, cfg: StationCfg, counts: dict) -> list:
     """Rows fit for timing, each with ``_prior`` and ``_y``; counts the rest."""
     out = []
-    for r in sd.rows:
+    for r in _latest_analysis(sd.rows, counts):
+        flags = set(filter(None, (r.get("flags") or "").split(",")))
+        for fl in REPORT_FLAGS:
+            if fl in flags:
+                counts[f"flagged_kept:{fl}"] += 1
         reasons = _exclusion_reasons(r)
         dc = _finite(r.get("delay_counter_s"))
         t = _finite(r.get("nominal_utc"))
@@ -710,6 +755,8 @@ def _cross_checks(sd, cfg, plane_ref) -> dict:
     (reading - plane error) where both exist."""
     out = {}
     for tier in cfg.cross_check:
+        if tier in cfg.reference:      # itself against itself: trivially zero
+            continue
         ser = _reference_series(sd, cfg, [tier])
         both = [m for m in ser if m in plane_ref]
         d = np.array([ser[m] - plane_ref[m] for m in both])
@@ -726,7 +773,7 @@ def _cross_checks(sd, cfg, plane_ref) -> dict:
 
 # ------------------------------------------------------------------ checks 1-3
 
-def _check1(used_by_station, refs, night_hour) -> dict:
+def _check1(used_by_station, refs, night_hours) -> dict:
     """Check 1.  Per (station, gs, band) and night: the mean of
     delay - prior - reference.  The verdict comes from each key's own
     night-to-night sd of those means, pooled across keys, so constant
@@ -735,9 +782,11 @@ def _check1(used_by_station, refs, night_hour) -> dict:
     to every key (the offset wandering) and the between-key remainder (the
     path).  The prior's error on a key enters its sum with the offset, so a
     failure stays ambiguous between offset and path unless the split names
-    one."""
+    one.  The common part names offset wander only when keys from two sites
+    or more carry it; at one site it mixes in that site's path."""
     per_key = {}
     for st, rows in used_by_station.items():
+        night_hour = night_hours[st]
         acc = defaultdict(lambda: defaultdict(list))
         for r in rows:
             if r["_prior"] is None:
@@ -766,22 +815,26 @@ def _check1(used_by_station, refs, night_hour) -> dict:
     for gs, keys in by_gs.items():
         sds, devs = [], defaultdict(dict)
         means = []
+        multi_sites = set()
         for key, nights in keys:
             mu = np.array([o for o, _, _ in nights.values()])
             means.append(float(mu.mean()))
             if len(mu) >= 2:
                 sds.append((float(np.std(mu, ddof=1)), len(mu)))
+                multi_sites.add(key[0])
                 for night, (o, _, _) in nights.items():
                     devs[night][key] = o - float(mu.mean())
         all_sds += sds
         common = {n: float(np.mean(list(d.values()))) for n, d in devs.items()}
         between = [dv - common[n] for n, d in devs.items() for dv in d.values()]
-        nk = max(len(keys), 1)
+        # only keys with two nights or more carry a deviation
+        nk = len({k for d in devs.values() for k in d})
         per_gs[gs] = {
             "offset_s": float(np.mean(means)),
             "within_key_sd_s": pooled(sds),
             "common_sd_s": (float(np.std(list(common.values()), ddof=1))
-                            if len(common) >= 2 else None),
+                            if len(common) >= 2 and len(multi_sites) >= 2 else None),
+            "sites": len(multi_sites),
             # between-key spread, corrected for the mean it was measured against
             "between_key_sd_s": (float(np.sqrt(np.mean(np.square(between)) * nk / (nk - 1)))
                                  if between and nk > 1 else None),
@@ -792,10 +845,11 @@ def _check1(used_by_station, refs, night_hour) -> dict:
             "steady": None if overall is None else overall <= STEADY_S}
 
 
-def _check2(used_by_station, refs, night_hour) -> dict:
+def _check2(used_by_station, refs, night_hours) -> dict:
     """Single-arrival scatter against the reference, by hour, both labels."""
     out = {}
     for st, rows in used_by_station.items():
+        night_hour = night_hours[st]
         res = {}
         for label, col in (("counter", "delay_counter_s"), ("status", "delay_s")):
             groups = defaultdict(list)
@@ -827,15 +881,23 @@ def _check2(used_by_station, refs, night_hour) -> dict:
     return out
 
 
+def _utc_day(t: float) -> int:
+    """frame_index wraps daily (0..2699 from 00:00Z), so a frame is named by
+    its UTC day and index together.  A slot never crosses midnight."""
+    return int(math.floor(t / 86400.0))
+
+
 def _frame_key(r):
-    return (_gs_key(r), r.get("freq_khz"), r.get("frame_index"), r.get("frame_offset"))
+    return (_gs_key(r), r.get("freq_khz"), _utc_day(r["nominal_utc"]),
+            r.get("frame_index"), r.get("frame_offset"))
 
 
-def _check3(used_by_station, refs, night_hour) -> dict:
+def _check3(used_by_station, refs, night_hours) -> dict:
     """One squitter heard at two sites: (d_A - e_A) - (d_B - e_B) against the
     geometric prior difference."""
     idx = {}
     for st, rows in used_by_station.items():
+        night_hour = night_hours[st]
         d = {}
         for r in rows:
             m = _minute(r["nominal_utc"])
@@ -871,14 +933,14 @@ def _multifreq(used_by_station, dup_counts) -> dict:
     for st, rows in used_by_station.items():
         frames = defaultdict(dict)
         for r in rows:
-            fr = frames[(_gs_key(r), r.get("frame_index"))]
+            fr = frames[(_gs_key(r), _utc_day(r["nominal_utc"]), r.get("frame_index"))]
             f = r.get("freq_khz")
             if f in fr:
                 dup_counts[st] = dup_counts.get(st, 0) + 1
                 continue
             fr[f] = r
         acc = defaultdict(lambda: {"counter": [], "status": []})
-        for (gs, _), byf in frames.items():
+        for (gs, _, _), byf in frames.items():
             fs = sorted(f for f in byf if f is not None)
             for i, fa in enumerate(fs):
                 for fb in fs[i + 1:]:
@@ -941,12 +1003,13 @@ def evaluate(data: dict, cfgs: dict, train_nights: int, night_hour: int = 12,
     stations = [s for s in sorted(data) if s in cfgs]
     for s in sorted(set(data) - set(cfgs)):
         notes.append(f"{s}: no entry in the stations file; skipped")
+    night_hours = {s: station_night_hour(cfgs[s], night_hour) for s in stations}
     nights = set()
     for s in stations:
-        sd = data[s]
-        nights |= {night_of(r["nominal_utc"], night_hour) for r in sd.rows
+        sd, nh = data[s], night_hours[s]
+        nights |= {night_of(r["nominal_utc"], nh) for r in sd.rows
                    if _finite(r.get("nominal_utc")) is not None}
-        nights |= {night_of(b["utc_minute"], night_hour) for b in sd.broadcasts
+        nights |= {night_of(b["utc_minute"], nh) for b in sd.broadcasts
                    if _finite(b.get("utc_minute")) is not None}
     train, score = split_nights(nights, train_nights)
     train_set, score_set = set(train), set(score)
@@ -955,6 +1018,14 @@ def evaluate(data: dict, cfgs: dict, train_nights: int, night_hour: int = 12,
     exclusions, label_noise, cross, windows = {}, {}, {}, {}
     for s in stations:
         sd, cfg = data[s], cfgs[s]
+        nh = night_hours[s]
+        if nh != night_hour:
+            notes.append(f"{s}: nights run {nh:02d}:00Z to {nh:02d}:00Z (its night "
+                         "window straddles the default boundary, or night_start_hour)")
+        dropped = [t for t in cfg.cross_check if t in cfg.reference]
+        if dropped:
+            notes.append(f"{s}: cross-check {'/'.join(dropped)} is also the reference; "
+                         "dropped (it would compare the reference with itself)")
         counts = defaultdict(int)
         ref = _reference_series(sd, cfg)
         refs[s] = ref
@@ -966,18 +1037,18 @@ def evaluate(data: dict, cfgs: dict, train_nights: int, night_hour: int = 12,
         f_in = _f_in(sd, cfg)
         epochs = _row_epochs(sd)
         if not epochs:
-            notes.append(f"{s}: no input_epoch_gps_s in the rows; WWV anchors "
-                         "get no radiod-run check")
+            notes.append(f"{s}: no input_epoch_gps_s in the rows; no count of "
+                         "WWV minutes from radiod runs without HFDL")
         anchors = _anchor_series(sd, f_in, epochs, counts)
         wwv = _wwv_measurements(sd, cfg, anchors, counts)
         hfdl = _hfdl_measurements(rows)
-        nuis = _train(cfg, wwv, hfdl, ref, train_set, night_hour)
+        nuis = _train(cfg, wwv, hfdl, ref, train_set, nh)
         nuisances[s] = nuis
-        recs = {arm: _reconstruct(wwv, hfdl, nuis, score_set, night_hour,
+        recs = {arm: _reconstruct(wwv, hfdl, nuis, score_set, nh,
                                   arm == "wwv+hfdl", counts) for arm in HFDL_ARMS}
         window = cfg.night_hours or tuple(overnight)
         windows[s] = window
-        sc = _score(recs, ref, score_set, night_hour, window, coverage)
+        sc = _score(recs, ref, score_set, nh, window, coverage)
         for arm in HFDL_ARMS:
             recon[(s, arm)] = recs[arm]
             scores[(s, arm)] = sc[arm]
@@ -996,8 +1067,8 @@ def evaluate(data: dict, cfgs: dict, train_nights: int, night_hour: int = 12,
                      "frequency); the multi-frequency check kept the first")
     return Evaluation(
         train_nights=train, score_nights=score, nuisances=nuisances, recon=recon,
-        scores=scores, check1=_check1(used, refs, night_hour),
-        check2=_check2(used, refs, night_hour), check3=_check3(used, refs, night_hour),
+        scores=scores, check1=_check1(used, refs, night_hours),
+        check2=_check2(used, refs, night_hours), check3=_check3(used, refs, night_hours),
         multifreq=mf, multifreq_duplicates=dups, exclusions=exclusions,
         label_noise=label_noise, cross_checks=cross, notes=notes,
         overnight=tuple(overnight), coverage=coverage, windows=windows, cfgs=cfgs)
@@ -1019,7 +1090,8 @@ def render_report(ev: Evaluation) -> str:
     a("# Squitter timing: offline evaluation\n")
     a(f"Training nights (nuisances learned here only): {', '.join(ev.train_nights)}  ")
     a(f"Scoring nights (held out): {', '.join(ev.score_nights)}  ")
-    a("A night runs 12:00Z to 12:00Z and takes the date it starts on.  "
+    a("A night runs 12:00Z to 12:00Z (unless a station's note says otherwise) and "
+      "takes the date it starts on.  "
       "All times in ms unless marked.\n")
     a("The counter label and the WWV index route both take UTC from the minute row's "
       "T6 anchor, so the reconstruction works in the T6 anchor plane, and the score "
@@ -1037,9 +1109,13 @@ def render_report(ev: Evaluation) -> str:
     a("")
 
     a("## Exclusions\n")
-    a("Rows kept out of every timing fit: `excluded` set, `found` false, or a flag "
-      "`unresolved_multipath` / `prekey_edge_mismatch`; plus rows without a counter "
-      "label.  WWV rows that carry only `residual_ms` (T3's own frame, fitted to those "
+    a("Rows kept out of every timing fit: `excluded` set, `found` false, or no "
+      "counter label; and a window's rows from an older analyser "
+      "(`superseded_analysis`; the newest `analyzer_version` stays).  The flag "
+      "`unresolved_multipath` only gets counted (`flagged_kept:unresolved_multipath`): "
+      "on real data it marks the strongest windows, so those rows stay in.  "
+      "`anchor_run_without_hfdl_rows` counts WWV minutes from radiod runs no HFDL "
+      "row names; they still score.  WWV rows that carry only `residual_ms` (T3's own frame, fitted to those "
       "same arrivals) stay out of check 4: `wwv_residual_route_excluded`.\n")
     for s, c in sorted(ev.exclusions.items()):
         a(f"- {s}: " + ", ".join(f"{k} {v}" for k, v in sorted(c.items())))
@@ -1076,15 +1152,16 @@ def render_report(ev: Evaluation) -> str:
       "own sd over nights, so steady differences between keys (receive chains, the "
       "prior's residue) do not count.  Per ground station, the nightly change splits "
       "into the part common to every key (the offset wandering) and the between-key "
-      "remainder (the path, e.g. hmF2).  The offset, the receive chain and the prior's "
+      "remainder (the path, e.g. hmF2); the common part needs keys from two sites "
+      "or more, else it reads `-`.  The offset, the receive chain and the prior's "
       "error enter each key as one sum: a failure stays ambiguous between offset and "
       "path unless the split names one.  No hmF2 regression yet: the broadcast rows "
       "name their ionosonde source but carry no hmF2 value.\n")
-    a("| ground station | mean offset | within-key sd | common sd | between-key sd | keys | nights |")
-    a("|---|---|---|---|---|---|---|")
+    a("| ground station | mean offset | within-key sd | common sd | between-key sd | keys | sites | nights |")
+    a("|---|---|---|---|---|---|---|---|")
     for gs, g in sorted(c1["per_gs"].items(), key=str):
         a(f"| {_gs_name(gs)} | {_ms(g['offset_s'])} | {_ms(g['within_key_sd_s'])} | "
-          f"{_ms(g['common_sd_s'])} | {_ms(g['between_key_sd_s'])} | {g['keys']} | {g['nights']} |")
+          f"{_ms(g['common_sd_s'])} | {_ms(g['between_key_sd_s'])} | {g['keys']} | {g['sites']} | {g['nights']} |")
     a("")
     a("| station | ground station | band | night | offset | sd | n |")
     a("|---|---|---|---|---|---|---|")
@@ -1113,7 +1190,7 @@ def render_report(ev: Evaluation) -> str:
     a("")
 
     a("## Check 3: do the sites agree?\n")
-    a("Same squitter (ground station, frequency, frame) heard at two sites: "
+    a("Same squitter (ground station, frequency, UTC day and frame) heard at two sites: "
       "(delay - prior - reference) at A minus the same at B.  Geometry and the "
       "references removed, what remains holds the two sites' chain difference plus the "
       "prior's residue; a night-to-night change points at labelling or the analyser.\n")

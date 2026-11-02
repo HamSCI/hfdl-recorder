@@ -118,7 +118,9 @@ def make_station(station, cfg, nights, seed, wwv_gap_hours=(), hours=range(0, 8)
                                 "radiod_id": station, "gs_id": gs,
                                 "gs_name": se.GROUND_STATIONS[gs][0],
                                 "freq_khz": freq, "band": band,
-                                "frame_index": ((n * 24 + h) * 60 + mi) * 2 + k,
+                                # frame_index wraps daily (0..2699), so
+                                # every night repeats the same indices
+                                "frame_index": ((h * 60 + mi) * 2 + k) % 2700,
                                 "frame_offset": 0,
                                 "nominal_utc": nominal, "t_level_active": "T6",
                                 "utc_sync": True, "found": True, "flags": "",
@@ -352,8 +354,6 @@ def test_exclusions_counted_and_kept_out_of_the_fit(tmp_path):
     bad = [dict(base, excluded="implausible_delay"),
            dict(base, excluded="utc_sync_false"),
            dict(base, found=False, delay_counter_s=None),
-           dict(base, flags="unresolved_multipath"),
-           dict(base, flags="lobe_wide,prekey_edge_mismatch"),
            dict(base, delay_counter_s=None)]
     for r in bad:
         if r.get("delay_counter_s") is not None:
@@ -364,8 +364,6 @@ def test_exclusions_counted_and_kept_out_of_the_fit(tmp_path):
     assert ex["excluded:implausible_delay"] == 1
     assert ex["excluded:utc_sync_false"] == 1
     assert ex["not_found"] == 1
-    assert ex["flag:unresolved_multipath"] == 1
-    assert ex["flag:prekey_edge_mismatch"] == 1
     assert ex["no_counter_label"] == 1
     assert ex["used"] == len(rows) - len(bad)
     for (station, gs, band), per_night in ev.check1["per_key"].items():
@@ -580,22 +578,6 @@ def test_wwv_index_route_shares_the_hfdl_plane():
     assert counts["wwv_index_route"] == 1 and counts["wwv_residual_route_excluded"] == 1
 
 
-def test_anchor_from_another_radiod_run_drops_out():
-    f_in = 64.8e6
-    m = 1_793_000_040
-    epoch = 1_792_990_000.0
-    good = {"utc_minute": m, "t3_shadow": {"t6_anchor_input_index": (m - epoch) * f_in,
-                                           "t6_anchor_utc_ns": m * 10**9}}
-    other = {"utc_minute": m + 60, "t3_shadow": {
-        "t6_anchor_input_index": (m + 60 - epoch + 7200) * f_in,   # a run 2 h earlier
-        "t6_anchor_utc_ns": (m + 60) * 10**9}}
-    from collections import defaultdict
-    counts = defaultdict(int)
-    out = se._anchor_series(se.StationData(minutes=[good, other]), f_in, [epoch], counts)
-    assert list(out) == [m]
-    assert counts["anchor_other_run"] == 1
-
-
 def test_one_key_counts_once_per_minute(tmp_path):
     """Rows of one key in one minute average first: correlated copies of one
     key must not outvote the other keys."""
@@ -609,3 +591,108 @@ def test_one_key_counts_once_per_minute(tmp_path):
     assert ev2.recon[key].keys() == ev.recon[key].keys()
     for m in ev.recon[key]:
         assert ev2.recon[key][m][0] == pytest.approx(ev.recon[key][m][0], abs=1e-12)
+
+
+# ---------------------------------------------------------------- final review
+
+def test_unresolved_multipath_is_report_only(tmp_path):
+    """On real data the flag marks the strongest windows: count it, keep them."""
+    assert "prekey_edge_mismatch" not in se.REPORT_FLAGS
+    data, cfgs = dataset(tmp_path, nights=3)
+    rows = data["RX-A"].rows
+    for r in rows[:50]:
+        r["flags"] = "unresolved_multipath"
+    ev = se.evaluate(data, cfgs, train_nights=1)
+    ex = ev.exclusions["RX-A"]
+    assert ex["used"] == len(rows)
+    assert ex["flagged_kept:unresolved_multipath"] == 50
+    assert "flag:unresolved_multipath" not in ex
+    assert "flagged_kept:unresolved_multipath" in se.render_report(ev)
+
+
+def test_wrapping_frame_index_pairs_only_the_same_night(tmp_path):
+    data, cfgs = dataset(tmp_path, nights=2)
+    ev = se.evaluate(data, cfgs, train_nights=1)
+    assert ev.multifreq_duplicates == {}
+    per_night_rows = len(data["RX-A"].rows) // 2
+    for (gs, a, b), c in ev.check3.items():
+        assert set(c["per_night"]) == {"20261101", "20261102"}, (gs, a, b)
+        assert c["n"] == 2 * per_night_rows // 2      # each of the two gs, both nights
+    for key, m in ev.multifreq.items():
+        assert m["n"] == 2 * 8 * 60 * 2                # both nights, every frame
+
+
+def test_check1_common_needs_two_sites(tmp_path):
+    data, cfgs = dataset(tmp_path, nights=3)
+    del data["RX-H"]
+    c1 = se.evaluate(data, cfgs, train_nights=1).check1
+    for gs, g in c1["per_gs"].items():
+        assert g["sites"] == 1
+        assert g["common_sd_s"] is None
+
+
+def test_check1_between_key_counts_only_multi_night_keys(tmp_path):
+    data, cfgs = dataset(tmp_path, nights=3)
+    _shift_night(data, "20261102",
+                 lambda st, r: r["gs_id"] == 1 and st == "RX-A", 0.3e-3)
+    g = se.evaluate(data, cfgs, train_nights=1).check1["per_gs"][1]
+    # a key heard on one night only: no night-to-night change of its own
+    extra = [dict(r, band="HFDL13", freq_khz=13312) for r in data["RX-H"].rows
+             if r["gs_id"] == 1 and se.night_of(r["nominal_utc"]) == "20261101"]
+    data["RX-H"].rows.extend(extra)
+    g2 = se.evaluate(data, cfgs, train_nights=1).check1["per_gs"][1]
+    assert g2["keys"] == g["keys"] + 1
+    assert g2["between_key_sd_s"] == pytest.approx(g["between_key_sd_s"], rel=1e-9)
+
+
+def test_anchor_of_a_run_without_hfdl_rows_still_serves_wwv():
+    f_in = 64.8e6
+    m = 1_793_000_040
+    epoch = 1_792_990_000.0
+    good = {"utc_minute": m, "t3_shadow": {"t6_anchor_input_index": (m - epoch) * f_in,
+                                           "t6_anchor_utc_ns": m * 10**9}}
+    other = {"utc_minute": m + 60, "t3_shadow": {
+        "t6_anchor_input_index": (m + 60 - epoch + 7200) * f_in,   # a run 2 h earlier
+        "t6_anchor_utc_ns": (m + 60) * 10**9}}
+    from collections import defaultdict
+    counts = defaultdict(int)
+    out = se._anchor_series(se.StationData(minutes=[good, other]), f_in, [epoch], counts)
+    assert list(out) == [m, m + 60]
+    assert counts["anchor_run_without_hfdl_rows"] == 1
+
+
+def test_night_boundary_per_station(tmp_path):
+    """A window straddling 12Z moves that station's night boundary out of it."""
+    assert se.station_night_hour(se.StationCfg("x", None, None, night_hours=(4, 14)), 12) == 14
+    assert se.station_night_hour(se.StationCfg("x", None, None, night_hours=(0, 8)), 12) == 12
+    assert se.station_night_hour(
+        se.StationCfg("x", None, None, night_hours=(4, 14), night_start_hour=18), 12) == 18
+    data, cfgs = dataset(tmp_path, nights=3, hours=range(4, 14))
+    for c in cfgs.values():
+        c.night_hours = (4, 14)
+    ev = se.evaluate(data, cfgs, train_nights=1)
+    assert len(ev.score_nights) == 2
+    assert ev.scores[("RX-A", "wwv")]["hours"] == 2 * 10
+
+
+def test_cross_check_skips_the_reference_tier(tmp_path):
+    data, cfgs = dataset(tmp_path, nights=2)
+    cfgs["RX-A"].cross_check = ["T6", "T4"]
+    ev = se.evaluate(data, cfgs, train_nights=1)
+    assert set(ev.cross_checks["RX-A"]) == {"T4"}
+
+
+def test_newest_analyser_row_wins(tmp_path):
+    data, cfgs = dataset(tmp_path, nights=3)
+    rows = data["RX-A"].rows
+    for i, r in enumerate(rows):
+        r["window_file"] = f"w{i}.npz"
+        r["analyzer_version"] = 2
+    old = [dict(r, analyzer_version=1, delay_counter_s=r["delay_counter_s"] + 0.02)
+           for r in rows[:100]]
+    rows.extend(old)
+    ev = se.evaluate(data, cfgs, train_nights=1)
+    assert ev.exclusions["RX-A"]["superseded_analysis"] == 100
+    for (st, gs, band), per_night in ev.check1["per_key"].items():
+        for off, sd, n in per_night.values():
+            assert abs(off - OFFSET_S) < 0.05e-3
