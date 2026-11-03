@@ -181,6 +181,23 @@ sample index of its first sample.  The windows land in
 deletes them after `retention_days`, and stops saving (never decoding) when
 free space falls below `min_free_gb`.
 
+`ground_stations` names the ground stations whose squitters get windows,
+spelled as dumphfdl's system table spells them (`"Reykjavik, Iceland"`).  A band
+can decode a ground station that the list leaves out, but its windows never get
+saved.  So choose bands and ground stations together.  A station close to a
+ground station may sit in its skip zone: UACNJ, about 100 km from Riverhead,
+decoded three times as many frames from Reykjavik as from Riverhead on HFDL8 and
+HFDL6 (2026-11-02).
+
+The window keeper costs little.  Measured on the Proxmox host at AC0G-ND with
+five bands (2026-11-03, 10-minute blocks, keeper on, off, on), it added about
+0.017 cores to the recorder's 0.28.
+
+dumphfdl's own JSON spool, `/var/lib/hfdl-recorder/<radiod_id>/<BAND>.json`,
+holds every decoded frame and nothing rotates it: about 15 MB a day per station
+at ND.  It stays that way, deliberately, until the timing study decides what to
+keep.
+
 A batch analyser times the saved windows.  It writes one row per window to
 the local `hfdl.squitter_timing` table in sigmond's sink, and it converts
 each arrival to UTC through hf-timestd's minute registration
