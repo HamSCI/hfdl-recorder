@@ -24,7 +24,7 @@ import numpy as np
 
 from hfdl_recorder.bands import HfdlBand
 from hfdl_recorder.core.feed import build_output_args
-from hfdl_recorder.core.radiod import HFDL_ENCODING, HFDL_PRESET
+from hfdl_recorder.core.radiod import HFDL_ENCODING, HFDL_PRESET, band_filter_edges
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,11 @@ class BandPipeline:
         keep-alive refreshes.
         """
         self._multi = multi
+        # The edges go through add_channel, not only the daemon's set_filter:
+        # MultiStream re-creates a dropped channel from what add_channel
+        # stored, and without them a radiod restart leaves the band at the
+        # "iq" preset's ±5 kHz.
+        low_edge, high_edge = band_filter_edges(self._band.samprate_hz)
         info = multi.add_channel(
             frequency_hz=float(self._band.center_hz),
             preset=HFDL_PRESET,
@@ -105,6 +110,8 @@ class BandPipeline:
             on_samples=self._on_samples,
             on_stream_dropped=self._on_stream_dropped,
             on_stream_restored=self._on_stream_restored,
+            low_edge=low_edge,
+            high_edge=high_edge,
             lifetime=lifetime,
         )
         self._ssrc = info.ssrc

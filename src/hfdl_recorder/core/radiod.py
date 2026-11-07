@@ -33,6 +33,19 @@ HFDL_PRESET = "iq"
 # and don't conflict with the F32LE ones we create on demand.
 HFDL_ENCODING = 4
 
+# The "iq" preset's default channel filter is ±5 kHz — sized for narrowband
+# audio, not an HFDL band.  Left there, radiod resamples a 10 kHz slice of
+# spectrum up to the band samprate and ground stations outside ±5 kHz of
+# center are lost.  The filter spans the band's Nyquist less a small guard
+# for the channelizer transition.
+FILTER_GUARD_HZ = 1500
+
+
+def band_filter_edges(samprate_hz: int) -> tuple[float, float]:
+    """Channel filter (low_edge, high_edge) in Hz for an HFDL band."""
+    half = samprate_hz / 2 - FILTER_GUARD_HZ
+    return -half, half
+
 
 @dataclass(frozen=True)
 class ResolvedChannel:

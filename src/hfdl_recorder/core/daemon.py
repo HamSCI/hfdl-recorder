@@ -25,6 +25,7 @@ from hfdl_recorder.core.ch_tailer import ChTailer
 from hfdl_recorder.core.radiod import (
     HFDL_ENCODING,
     HFDL_PRESET,
+    band_filter_edges,
 )
 
 logger = logging.getLogger(__name__)
@@ -162,17 +163,13 @@ class HfdlRecorder:
                         "%s: set_output_encoding(ssrc=%d, %d) failed",
                         band.name, info.ssrc, HFDL_ENCODING,
                     )
-            # The "iq" preset's default channel filter is ±5 kHz — sized
-            # for narrowband audio, not an HFDL band. Without this call,
-            # radiod resamples a 10 kHz slice of spectrum up to the band
-            # samprate and ground stations outside ±5 kHz of center are
-            # lost. Set the filter to span the full band Nyquist with a
-            # small guard for the channelizer transition.
-            guard_hz = 1500
+            # Widen the "iq" preset's ±5 kHz filter to the whole band
+            # (radiod.band_filter_edges).  attach() hands MultiStream the
+            # same edges, so a channel it re-creates after a radiod restart
+            # keeps them.
+            low_edge, high_edge = band_filter_edges(band.samprate_hz)
             self._control.set_filter(
-                ssrc=info.ssrc,
-                low_edge=-band.samprate_hz / 2 + guard_hz,
-                high_edge=+band.samprate_hz / 2 - guard_hz,
+                ssrc=info.ssrc, low_edge=low_edge, high_edge=high_edge,
             )
             key = (info.multicast_address, info.port)
             multi = multi_by_group.get(key)
