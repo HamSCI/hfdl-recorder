@@ -253,7 +253,11 @@ def _default_writer_factory(**kw):
 
 def _windows(window_dir: Path, radiod_id: Optional[str] = None):
     """Window files in order: radiod, day, then name."""
-    for p in sorted(window_dir.glob(f"{radiod_id or '*'}/*/*.npz")):
+    try:
+        listing = sorted(window_dir.glob(f"{radiod_id or '*'}/*/*.npz"))
+    except FileNotFoundError:        # a day folder pruned while listing
+        return
+    for p in listing:
         if p.name.endswith(".tmp"):
             continue
         yield p
@@ -365,7 +369,9 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
     regs = Registrations(Path(registration_dir))
     now = time.time() if now is None else float(now)
     counts = {"analysed": 0, "found": 0, "errors": 0, "skipped_done": 0,
-              "skipped_since": 0, "deferred": 0, "awaiting_registration": 0}
+              "skipped_since": 0, "deferred": 0, "awaiting_registration": 0,
+              "vanished": 0}
+    vanished_sample: Optional[Path] = None
     rows: list[dict] = []
     pending: list[Path] = []        # inserted, not yet durable: no .done yet
     writer = None
@@ -419,6 +425,10 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
                 break
         try:
             row, missing = _row_for(path, regs)
+        except FileNotFoundError:    # the keeper pruned it: expected, no row
+            counts["vanished"] += 1
+            vanished_sample = vanished_sample or path
+            continue
         except Exception as exc:     # one bad file never stalls the batch
             logger.warning("batch_error %s: %s: %s", path, type(exc).__name__, exc)
             row, missing = _error_row(path, exc), False
@@ -458,5 +468,8 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
                 _append_jsonl(jsonl_path, rows)
         except OSError as exc:
             logger.error("cannot write the row copy: %s", exc)
+    if counts["vanished"]:
+        logger.info("%d windows vanished before they were read (pruned by the "
+                    "window keeper); e.g. %s", counts["vanished"], vanished_sample)
     logger.info("squitter-analyze: %s", counts)
     return counts

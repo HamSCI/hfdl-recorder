@@ -228,6 +228,39 @@ def test_bad_window_gets_batch_error_row_and_done(tmp_path):
     assert counts["errors"] == 1
 
 
+def test_vanished_windows_count_apart_and_log_once(tmp_path, monkeypatch, caplog):
+    """The keeper prunes a window between listing and reading: expected life."""
+    for i in range(5):
+        _window(tmp_path / "win", 0.0123, frame=i)
+    real = batch._row_for
+
+    def pruned(path, regs):
+        if path.name.split("-")[2].startswith(("1.", "3.")):   # frames 1 and 3
+            path.unlink()
+        return real(path, regs)
+
+    monkeypatch.setattr(batch, "_row_for", pruned)
+    with caplog.at_level("INFO", logger="hfdl_recorder.timing.batch"):
+        fac, counts = _run(tmp_path)
+    assert counts["vanished"] == 2 and counts["errors"] == 0
+    assert counts["analysed"] == 3 and len(fac.writer.inserts) == 3
+    done = [d.name for d in (tmp_path / "win").glob("*/*/*.done")]
+    assert len(done) == 3
+    mentions = [r for r in caplog.records if "vanished before" in r.getMessage() or "FileNotFound" in r.getMessage()]
+    assert len(mentions) == 1 and mentions[0].levelname == "INFO"
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_corrupt_window_still_an_error_with_warning(tmp_path, caplog):
+    _window(tmp_path / "win", 0.0123, frame=0)
+    bad = tmp_path / "win" / "radiod0" / "20261102" / "7-8912-9.npz"
+    bad.write_bytes(b"not an npz")
+    with caplog.at_level("INFO", logger="hfdl_recorder.timing.batch"):
+        _, counts = _run(tmp_path)
+    assert counts["errors"] == 1 and counts["vanished"] == 0
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 1
+
+
 def test_tmp_files_skipped_and_since_filter(tmp_path):
     p, _ = _window(tmp_path / "win", 0.0123)
     (p.parent / "7-8912-5.npz.tmp").write_bytes(b"partial")
