@@ -196,6 +196,22 @@ class TestChTailer(unittest.TestCase):
         )
         return tailer, fake
 
+    def test_config_station_id_names_rows(self):
+        # With the airframes.io feed on, dumphfdl stamps frames with the
+        # airframes name; our rows keep the station's own station_id.
+        fake = FakeWriter()
+        tailer = ChTailer(
+            json_path=Path("/nonexistent/HFDL21.json"),
+            band_name="HFDL21",
+            radiod_id="test-rx888",
+            station_id="AC0G-B4",
+            writer_factory=lambda batch_rows: fake,
+        )
+        tailer._writer = fake
+        tailer._consume(LINE_SPDU + "\n")
+        self.assertEqual(len(fake.inserts), 1)
+        self.assertEqual(fake.inserts[0]["station_id"], "AC0G-B4")
+
     def test_skips_history_at_startup(self):
         import tempfile
         with tempfile.TemporaryDirectory() as td:

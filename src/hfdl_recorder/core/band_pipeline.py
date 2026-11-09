@@ -266,6 +266,8 @@ class BandPipeline:
         )
         spool = Path(self._paths.get("spool_dir", "/var/lib/hfdl-recorder"))
         station_id = self._station.get("station_id", "")
+        if self._sinks.get("airframes_io") and self._sinks.get("airframes_station_id"):
+            station_id = self._sinks["airframes_station_id"]
 
         # dumphfdl wants centerfreq in kHz; ``%g`` keeps "21964" or
         # "10061.5" depending on whether the band has a half-kHz offset.

@@ -157,7 +157,9 @@ deploy.toml           # Sigmond deploy manifest
   across most bands trigger sd_notify failure → unit restart.
 - **Aggregators are opt-in** — `sinks.local_json` defaults true,
   `sinks.airframes_io` defaults false; extra TCP/UDP sinks via the
-  `sinks.extra` array.
+  `sinks.extra` array.  The feed's station name lives in
+  `sinks.airframes_station_id`, so turning it on never renames the
+  station in `hfdl.spots` (ChTailer stamps rows with `station.station_id`).
 - **Spot tailer feeds `hfdl.spots`** — `core/ch_tailer.py` runs one
   daemon thread per band that tails the per-band JSON spool and inserts
   parsed frames via `sigmond.hamsci_sink.Writer.from_env()`, which stages

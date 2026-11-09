@@ -334,3 +334,20 @@ def test_keeper_without_rtp_logs_once(caplog):
     hits = [r for r in caplog.records if "delivered_rtp_start" in r.getMessage()]
     assert len(hits) == 1
     assert rec.calls == []
+
+
+def test_build_argv_airframes_station_id_feeds_dumphfdl():
+    # The airframes.io name goes to dumphfdl only while the feed is on.
+    cfg = _make_config(sinks={"local_json": True, "airframes_io": True,
+                              "airframes_station_id": "MH-KCOU-HFDL"})
+    argv = BandPipeline(band=HFDL_BANDS["HFDL5"], radiod_id="rx888",
+                        config=cfg).build_argv()
+    assert argv[argv.index("--station-id") + 1] == "MH-KCOU-HFDL"
+
+
+def test_build_argv_airframes_station_id_ignored_with_feed_off():
+    cfg = _make_config(sinks={"local_json": True, "airframes_io": False,
+                              "airframes_station_id": "MH-KCOU-HFDL"})
+    argv = BandPipeline(band=HFDL_BANDS["HFDL5"], radiod_id="rx888",
+                        config=cfg).build_argv()
+    assert argv[argv.index("--station-id") + 1] == "TEST-1"

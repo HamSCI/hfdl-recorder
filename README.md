@@ -109,11 +109,16 @@ tail -f /var/lib/hfdl-recorder/<radiod-id>/HFDL13.json
 
 ## Feeding airframes.io
 
+**Off by default.**  The feed needs an airframes.io account and a
+station registered in the operator's name, so only the operator can
+turn it on.  Nothing in hfdl-recorder, squitter timing included,
+depends on it.
+
 [Airframes](https://app.airframes.io) is the de-facto community
 aggregator for crowdsourced HFDL traffic.  The live feed is
 identified by a **station name that you register on their site**
 — your amateur callsign alone is not the right value.  Sending
-feeds with an unregistered or mismatched `station_id` will
+feeds with an unregistered or mismatched `airframes_station_id` will
 silently fail (the server accepts the TCP connection but
 discards the messages).
 
@@ -129,12 +134,14 @@ Setup:
 3. **Edit the config**:
 
    ```toml
-   [station]
-   station_id = "MH-KCOU-HFDL"   # MUST match what you registered
-
    [sinks]
-   airframes_io = true            # enables the TCP push to feed.airframes.io:5556
+   airframes_io = true                     # enables the TCP push to feed.airframes.io:5556
+   airframes_station_id = "MH-KCOU-HFDL"   # MUST match what you registered
    ```
+
+   Leave `[station] station_id` as it is: it names the station in the
+   local JSON and in the `hfdl.spots` rows, which keep it while
+   dumphfdl reports `airframes_station_id` to airframes.io.
 4. **Validate and restart**:
 
    ```bash
@@ -154,7 +161,7 @@ Setup:
    Decodes show up within ~15 minutes once the antenna picks up
    traffic.  If your station page stays empty for an extended
    period despite an `ESTAB` socket, double-check that
-   `station_id` exactly matches the registered name (it's
+   `airframes_station_id` exactly matches the registered name (it's
    case-sensitive).
 
 The Airframes web UI also offers an installer token (`bash <(curl

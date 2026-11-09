@@ -27,6 +27,7 @@ def test_load_config_applies_defaults():
     assert "sinks" in cfg
     assert cfg["sinks"]["local_json"] is True
     assert cfg["sinks"]["airframes_io"] is False
+    assert cfg["sinks"]["airframes_station_id"] == ""
 
 
 def test_load_config_missing_file(tmp_path):

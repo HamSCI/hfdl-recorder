@@ -271,6 +271,7 @@ class ChTailer:
         batch_rows: int = 200,
         writer_factory=None,
         reporter_id: Optional[str] = None,
+        station_id: Optional[str] = None,
         on_squitter: Optional[Callable[[dict], None]] = None,
     ) -> None:
         self._json_path = Path(json_path)
@@ -279,6 +280,10 @@ class ChTailer:
         # Phase-5 (sigmond MULTI-INSTANCE-ARCHITECTURE.md §3):
         # falls back to radiod_id for legacy single-instance hosts.
         self._reporter_id = reporter_id or radiod_id
+        # The station's own station_id, stamped on every row in place of
+        # the frame's: with the airframes.io feed on, dumphfdl stamps
+        # frames with the airframes name instead.
+        self._station_id = station_id
         self._host_call = host_call
         self._host_grid = host_grid
         self._processing_version = processing_version
@@ -402,6 +407,8 @@ class ChTailer:
             row["radiod_id"] = self._radiod_id
             row["instance"] = self._radiod_id   # legacy; removed Phase 9
             row["reporter_id"] = self._reporter_id
+            if self._station_id:
+                row["station_id"] = self._station_id
             row["processing_version"] = self._processing_version
             rows.append(row)
         if rows and self._writer is not None:

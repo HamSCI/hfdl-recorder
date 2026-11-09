@@ -87,6 +87,10 @@ DEFAULTS: dict[str, Any] = {
     "sinks": {
         "local_json":   True,
         "airframes_io": False,
+        # The station name registered at airframes.io.  dumphfdl gets it
+        # as --station-id only while airframes_io is on; empty falls back
+        # to station.station_id.  Our own rows keep station.station_id.
+        "airframes_station_id": "",
     },
     "processing": {
         # radiod LIFETIME tag (ka9q-python ≥3.13.0, ka9q-radio ≥0f8b622).

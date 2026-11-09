@@ -195,11 +195,22 @@ def _collect_issues(config: dict, paths: dict) -> list[dict]:
         })
 
     sinks = config.get("sinks", {})
-    if sinks.get("airframes_io") and not station.get("station_id"):
+    if sinks.get("airframes_io") and not (
+            sinks.get("airframes_station_id") or station.get("station_id")):
         issues.append({
             "severity": "fail",
             "instance": "all",
-            "message": "sinks.airframes_io requires station.station_id",
+            "message": ("sinks.airframes_io requires sinks.airframes_station_id "
+                        "(or station.station_id)"),
+        })
+    elif sinks.get("airframes_io") and not sinks.get("airframes_station_id"):
+        issues.append({
+            "severity": "warn",
+            "instance": "all",
+            "message": ("sinks.airframes_io is on without sinks.airframes_station_id: "
+                        "station.station_id goes to airframes.io as the station name.  "
+                        "Set airframes_station_id to the registered name rather than "
+                        "changing station_id"),
         })
 
     dumphfdl = paths.get("dumphfdl", "/opt/git/sigmond/hfdl-recorder/bin/dumphfdl")

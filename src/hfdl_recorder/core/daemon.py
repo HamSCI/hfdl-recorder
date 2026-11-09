@@ -378,6 +378,7 @@ class HfdlRecorder:
                     band_name=band_name,
                     radiod_id=self._radiod_id,
                     reporter_id=self._reporter_id,
+                    station_id=station.get("station_id") or None,
                     host_call=host_call,
                     host_grid=host_grid,
                     processing_version=proc_version,

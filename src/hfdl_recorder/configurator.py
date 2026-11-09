@@ -67,8 +67,8 @@ def cmd_config_init(args) -> int:
     _info("")
     _info("Next steps:")
     _info(f"  1. Review [radiod.bands].enabled in {target}")
-    _info(f"  2. If feeding airframes.io, register {values['station_id']!r} "
-          f"at https://app.airframes.io")
+    _info("  2. Optional: to feed airframes.io, register a station at "
+          "https://app.airframes.io and set [sinks] airframes_station_id")
     _info(f"  3. Validate: hfdl-recorder validate --json")
     _info(f"  4. Start:    sudo systemctl enable --now "
           f"hfdl-recorder@{values['radiod_status']}.service")
@@ -102,7 +102,7 @@ def cmd_config_edit(args) -> int:
         _info(f"radiod[{block_index}].status = {cur_status}")
         return 0
 
-    new_station = _prompt("station_id (airframes.io registration)",
+    new_station = _prompt("station_id",
                           cur_station or _default_station_id())
     new_grid    = _prompt("Grid square",
                           cur_grid or os.environ.get("STATION_GRID", ""))
@@ -234,7 +234,7 @@ def _collect_init_values(args) -> dict:
             "radiod_status": radiod_status,
         }
 
-    station_id  = _prompt("station_id (airframes.io registration)",
+    station_id  = _prompt("station_id",
                           default_station, required=True)
     grid_square = _prompt("Grid square", grid, required=True)
 

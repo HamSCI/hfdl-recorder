@@ -2,15 +2,10 @@
 # See https://github.com/HamSCI/hfdl-recorder for documentation.
 
 [station]
-# dumphfdl --station-id; also identifies live feeds to aggregators.
-#
-# If you intend to push to airframes.io (sinks.airframes_io = true below),
-# this MUST match the station name you registered at https://app.airframes.io
-# — the server accepts the TCP connection regardless but silently drops
-# messages that don't match a registered station.  See README.md
-# "Feeding airframes.io" for the registration walkthrough.
-#
-# If you only write local JSON, any unique string works (e.g. your callsign).
+# This station's identity: dumphfdl --station-id, and the station named in
+# the local JSON and in the hfdl.spots rows.  Any unique string works (e.g.
+# your callsign).  The airframes.io feed takes its own name, below
+# (sinks.airframes_station_id), so leave this one alone when you turn it on.
 station_id  = "YOURCALL-1"
 grid_square = "AA00aa"
 
@@ -25,6 +20,11 @@ systable  = "/var/lib/hfdl-recorder/systable.conf"
 [sinks]
 local_json   = true   # always write decoded JSON, one file per band
 airframes_io = false  # opt-in: TCP push to feed.airframes.io:5556
+# The station name you registered at https://app.airframes.io, exactly,
+# capitals included.  airframes.io accepts the connection regardless but
+# silently drops messages from an unregistered name.  Used only while
+# airframes_io = true.  See README.md "Feeding airframes.io".
+airframes_station_id = ""
 # extra = [{ proto = "tcp", host = "agg.example", port = 5556, format = "json" }]
 
 # Optional standalone fallback for chain-delay correction (contract v0.4 §8).

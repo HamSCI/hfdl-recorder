@@ -127,3 +127,28 @@ def test_validate_fails_airframes_without_station_id():
         i["severity"] == "fail" and "station_id" in i["message"]
         for i in payload["issues"]
     )
+
+
+def test_validate_accepts_airframes_station_id_alone():
+    cfg = load_config(FIXTURE)
+    cfg["station"]["station_id"] = "AC0G-B4"
+    cfg["sinks"]["airframes_io"] = True
+    cfg["sinks"]["airframes_station_id"] = "MH-KCOU-HFDL"
+    payload = build_validate(cfg)
+    assert not any(
+        i["severity"] == "fail" and "airframes" in i["message"]
+        for i in payload["issues"]
+    )
+
+
+def test_validate_warns_airframes_on_without_its_own_name():
+    # Feed on with no airframes_station_id: station_id doubles as the
+    # airframes name, which also renames our own rows.  Warn, not fail.
+    cfg = load_config(FIXTURE)
+    cfg["station"]["station_id"] = "AC0G-B4"
+    cfg["sinks"]["airframes_io"] = True
+    payload = build_validate(cfg)
+    assert any(
+        i["severity"] == "warn" and "airframes_station_id" in i["message"]
+        for i in payload["issues"]
+    )

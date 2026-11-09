@@ -26,7 +26,8 @@
 [station.station_id]
 title          = "PSWS station_id (should equal reporter_id)"
 help           = """The station identity embedded in dumphfdl's
---station-id flag and reported to feed.airframes.io.
+--station-id flag and in the local JSON and hfdl.spots rows.  The
+airframes.io feed uses sinks.airframes_station_id instead.
 
 By convention, hfdl-recorder's station_id MUST equal this instance's
 reporter_id (shown above as the locked `[instance].reporter_id`).
@@ -78,6 +79,15 @@ Turn OFF only when you're sure you don't want local storage (e.g.
 push-only to airframes.io with no local archive).  Most operators
 leave this ON — it's the canonical local audit trail."""
 required       = true
+
+[sinks.airframes_station_id]
+title          = "airframes.io station name"
+help           = """The station name you registered at app.airframes.io,
+exactly, capitals included.  Used only while sinks.airframes_io is on;
+dumphfdl then reports this name to airframes.io.  Your own records keep
+station.station_id."""
+example        = "MH-KCOU-HFDL"
+required       = false
 
 [sinks.airframes_io]
 title          = "Upload to feed.airframes.io?"
