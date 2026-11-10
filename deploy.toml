@@ -78,6 +78,64 @@ templated_units = ["hfdl-recorder@.service"]
 # is on and windows accumulate:
 #   systemctl enable --now hfdl-recorder-squitters@<radiod>.timer
 
+# sigmondb rows -> wd30 in their own tars, never a spot tar.  sigmond renders this
+# only for an hs-uploader that offers "sigmondb-tar".
+[[hs_uploader.pipeline]]
+name = "hfdl-sigmondb-arrival"
+requires_features = ["sigmondb-tar"]
+batch_limit = 5000
+[hs_uploader.pipeline.source]
+type = "sqlite"
+database = "sigmondb"
+table = "arrival"
+accepted_schema_versions = [1]
+producer = "hfdl-recorder"          # no start_at: the rows are new; ship from the first
+[hs_uploader.pipeline.transport]
+type = "wsprdaemon_tar"
+name = "wsprdaemon-tar-sftp:sigmondb-arrival"
+servers = ["gw1.wsprdaemon.org", "gw2.wsprdaemon.org"]
+version = "4.0"
+receiver = "{call_pathsafe}"
+compression = "bz2"
+tar_root = "wsprdaemon"
+primary_table_name = "sigmondb.arrival"
+tar_tag = "chirp-arrival"
+[hs_uploader.pipeline.transport.ftp_fallback]
+servers = ["gw2.wsprdaemon.org"]
+ftp_user = "noisegraphs"
+remote_path = "upload"
+[hs_uploader.pipeline.retry]
+base = 2.0
+cap_sec = 900.0
+
+[[hs_uploader.pipeline]]
+name = "hfdl-sigmondb-capture"
+requires_features = ["sigmondb-tar"]
+batch_limit = 5000
+[hs_uploader.pipeline.source]
+type = "sqlite"
+database = "sigmondb"
+table = "capture"
+accepted_schema_versions = [1]
+producer = "hfdl-recorder"          # no start_at: the rows are new; ship from the first
+[hs_uploader.pipeline.transport]
+type = "wsprdaemon_tar"
+name = "wsprdaemon-tar-sftp:sigmondb-capture"
+servers = ["gw1.wsprdaemon.org", "gw2.wsprdaemon.org"]
+version = "4.0"
+receiver = "{call_pathsafe}"
+compression = "bz2"
+tar_root = "wsprdaemon"
+primary_table_name = "sigmondb.capture"
+tar_tag = "chirp-capture"
+[hs_uploader.pipeline.transport.ftp_fallback]
+servers = ["gw2.wsprdaemon.org"]
+ftp_user = "noisegraphs"
+remote_path = "upload"
+[hs_uploader.pipeline.retry]
+base = 2.0
+cap_sec = 900.0
+
 # CONTRACT v0.6 §17 — local sink for `hfdl.spots`.  An in-process
 # tailer thread parses the JSON-per-line file dumphfdl writes at
 # `/var/lib/hfdl-recorder/<radiod_id>/<band>.json` and stages parsed

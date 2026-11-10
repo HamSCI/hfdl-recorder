@@ -50,18 +50,22 @@ class FakeWriter:
 
 
 class Factory:
+    """One FakeWriter per table; ``kw`` configures the squitter_timing one.
+    Pre-set ``writers[<table>]`` to configure another."""
+
     def __init__(self, **kw):
         self.writer = FakeWriter(**kw)
+        self.writers = {"squitter_timing": self.writer}
         self.calls = []
 
     def __call__(self, **kw):
         self.calls.append(kw)
-        return self.writer
+        return self.writers.setdefault(kw["table"], FakeWriter())
 
 
 def _window(root, delay, *, frame=0, nominal=NOMINAL, idx_offset=0.0,
             status_late_s=0.0, utc_sync=True, epoch_gps=EPOCH_GPS,
-            with_index=True, x=None, name=None):
+            with_index=True, x=None, name=None, freq_khz=8912, gs_id=7):
     """Write one window file; returns its path and the counter label."""
     t0_counter = nominal - 0.03
     idx0 = round((t0_counter - (epoch_gps + GPS_TO_UTC)) * F_IN) + idx_offset
@@ -69,8 +73,8 @@ def _window(root, delay, *, frame=0, nominal=NOMINAL, idx_offset=0.0,
     if x is None:
         x = w.synth_squitter(FS, delay, snr_db=20, rng=np.random.default_rng(frame + 7))
     meta = {
-        "t0_utc": t0, "nominal_utc": nominal, "fs": FS, "freq_khz": 8912,
-        "gs_id": 7, "gs_name": "Test", "frame_index": frame, "frame_offset": 2,
+        "t0_utc": t0, "nominal_utc": nominal, "fs": FS, "freq_khz": freq_khz,
+        "gs_id": gs_id, "gs_name": "Test", "frame_index": frame, "frame_offset": 2,
         "band": "8", "anchor_source": "status", "offset_ns": 0,
         "t_level_active": "T3", "utc_sync": utc_sync,
         "input_index0": float(idx0) if with_index else None,
@@ -83,7 +87,7 @@ def _window(root, delay, *, frame=0, nominal=NOMINAL, idx_offset=0.0,
     day = "20261102"
     d = root / "radiod0" / day
     d.mkdir(parents=True, exist_ok=True)
-    p = d / (name or f"7-8912-{frame}.npz")
+    p = d / (name or f"{gs_id}-{freq_khz}-{frame}.npz")
     np.savez(p, x=np.asarray(x, dtype=np.complex64), meta=np.str_(json.dumps(meta)))
     return p, idx0
 
@@ -509,3 +513,146 @@ def test_cli_dir_defaults_from_config(tmp_path, monkeypatch):
         cli.main()
     assert e.value.code == 0
     assert str(seen["dir"]) == str(tmp_path / "w")
+
+
+# ------------------------------------------------------- sigmondb rows (Task 7)
+
+def _as_t6(p):
+    """Rewrite a window's meta as a T6 window with a counter map."""
+    with np.load(p) as z:
+        x, meta = z["x"], json.loads(str(z["meta"]))
+    meta["t_level_active"] = "T6"
+    meta["counter_map"] = {"input_epoch_gps_s": EPOCH_GPS}
+    np.savez(p, x=x, meta=np.str_(json.dumps(meta)))
+
+
+def _run_calls(tmp_path):
+    _window(tmp_path / "win", 0.0123)
+    fac, _ = _run(tmp_path)
+    return fac.calls
+
+
+def test_found_t6_window_writes_an_assumed_arrival(tmp_path):
+    fac = Factory()
+    p, idx0 = _window(tmp_path / "win", 0.012)
+    _as_t6(p)
+    _registration(tmp_path / "reg", idx0)
+    _, counts = _run(tmp_path, fac, reporter_id="AC0G/B4")
+    (a,) = fac.writers["arrival"].inserts
+    assert a["reporter_id"] == "AC0G/B4" and a["engineering"]["delay_basis"] == "counter"
+    assert a["tx_id"] == "hfdl:7" and a["a_level_provenance"] == "assumed"
+    assert a["counter_epoch_id"] == "ep-1477000000"
+    assert counts["arrivals"] == 1 and counts["captures"] == 1
+    (c,) = fac.writers["capture"].inserts
+    assert c["reporter_id"] == "AC0G/B4" and c["n_expected"] == 1 and c["n_found"] == 1
+
+
+def test_no_reporter_id_gives_an_empty_one(tmp_path):
+    fac = Factory()
+    _window(tmp_path / "win", 0.012)
+    _run(tmp_path, fac)
+    assert fac.writers["arrival"].inserts[0]["reporter_id"] == ""
+    assert fac.writers["capture"].inserts[0]["reporter_id"] == ""
+
+
+def test_sigmondb_writers_are_not_local_and_name_the_producer(tmp_path):
+    calls = _run_calls(tmp_path)
+    kw = {c["table"]: c for c in calls}
+    assert calls[0]["table"] == "squitter_timing" and calls[0]["local"] is True
+    for t in ("arrival", "capture"):
+        assert (kw[t]["mode"], kw[t]["schema_version"], kw[t]["producer"]) == (
+            "sigmondb", 1, "hfdl-recorder")
+        assert not kw[t].get("local")
+
+
+def test_one_capture_per_frequency_per_run(tmp_path):
+    _window(tmp_path / "win", 0.0123, frame=0, freq_khz=11387)
+    _window(tmp_path / "win", 0.0123, frame=0, freq_khz=13276, gs_id=3)
+    fac1, _ = _run(tmp_path)
+    _window(tmp_path / "win", 0.0123, frame=1, freq_khz=11387, nominal=NOMINAL + 64)
+    fac2, _ = _run(tmp_path)
+    caps = fac1.writers["capture"].inserts + fac2.writers["capture"].inserts
+    assert len(fac1.writers["capture"].inserts) == 2 and len(caps) == 3
+    assert len({(c["centre_hz"], c["time"]) for c in caps}) == 3
+    assert all(c["n_expected"] == 1 for c in caps)
+
+
+def test_failed_arrival_flush_marks_nothing(tmp_path):
+    for i in range(2):
+        _window(tmp_path / "win", 0.0123, frame=i)
+    fac = Factory()
+    fac.writers["arrival"] = FakeWriter(fail_flush=True)
+    _, counts = _run(tmp_path, fac)
+    assert _dones(tmp_path) == [] and counts["stopped"]
+    assert fac.writers["capture"].inserts == []
+
+
+def test_stopped_run_writes_captures_for_committed_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(batch, "FLUSH_EVERY", 1)
+    for i in range(4):
+        _window(tmp_path / "win", 0.0123, frame=i)
+    fac = Factory()
+    real, n = fac.writer.insert, []
+
+    def third_fails(rows):
+        n.append(1)
+        if len(n) == 3:
+            raise RuntimeError("BufferFull")
+        real(rows)
+    fac.writer.insert = third_fails
+    _, counts = _run(tmp_path, fac)
+    assert counts["stopped"] and len(_dones(tmp_path)) == 2
+    assert len(fac.writers["arrival"].inserts) == 2
+    (c,) = fac.writers["capture"].inserts
+    assert c["n_expected"] == 2 and counts["captures"] == 1
+
+
+def test_no_sink_mode_writes_no_sigmondb(tmp_path):
+    _window(tmp_path / "win", 0.0123)
+    fac = Factory()
+    counts = batch.run_batch(tmp_path / "win", registration_dir=tmp_path / "reg",
+                             sink=False, jsonl_path=tmp_path / "o.jsonl",
+                             writer_factory=fac)
+    assert not any(c.get("table") == "arrival" for c in fac.calls)
+    assert counts["arrivals"] == 0 and counts["captures"] == 0
+
+
+def test_a_bad_arrival_costs_only_its_row_and_logs_once(tmp_path, monkeypatch, caplog):
+    for i in range(3):
+        _window(tmp_path / "win", 0.0123, frame=i)
+    real = batch._row_for
+
+    def no_snr(path, regs):
+        row, missing = real(path, regs)
+        if not path.name.endswith("-2.npz"):
+            row["snr_db"] = None          # NaN, cleaned: arrival_for raises
+        return row, missing
+    monkeypatch.setattr(batch, "_row_for", no_snr)
+    fac = Factory()
+    with caplog.at_level("INFO", logger="hfdl_recorder.timing.batch"):
+        _, counts = _run(tmp_path, fac)
+    assert not counts["stopped"] and len(_dones(tmp_path)) == 3
+    assert len(fac.writer.inserts) == 3 and len(fac.writers["arrival"].inserts) == 1
+    (c,) = fac.writers["capture"].inserts
+    assert c["n_expected"] == 3 and c["n_found"] == 1
+    assert len([r for r in caplog.records if "no arrival" in r.getMessage()]) == 1
+
+
+def test_cli_passes_the_instance_reporter_id(tmp_path, monkeypatch):
+    import sys
+    from hfdl_recorder import cli
+    from hfdl_recorder.timing import batch as b
+    cfg = tmp_path / "c.toml"
+    cfg.write_text('[instance]\nreporter_id = "AC0G/B4"\n\n[timing_squitters]\n'
+                   'window_dir = "%s"\n' % (tmp_path / "w"))
+    seen = {}
+
+    def fake(window_dir, **kw):
+        seen.update(kw)
+        return {"stopped": False}
+    monkeypatch.setattr(b, "run_batch", fake)
+    monkeypatch.setattr(sys, "argv", ["hfdl-recorder", "squitter-analyze",
+                                      "--config", str(cfg)])
+    with pytest.raises(SystemExit):
+        cli.main()
+    assert seen["reporter_id"] == "AC0G/B4"

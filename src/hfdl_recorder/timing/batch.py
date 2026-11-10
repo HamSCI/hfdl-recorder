@@ -11,6 +11,21 @@ as not done, so new timing code re-times old windows; every row carries
 ``analyzer_version`` to keep the two apart.  One run handles at most
 ``max_windows`` windows.
 
+With the sink, the batch also writes sigmondb rows that hs-uploader ships to
+wd30 (``timing/sigmondb_rows.py`` maps them).  Each window that gives an
+arrival adds one ``arrival`` row; at the end of the run, one ``capture`` row
+per (frequency, analyser version) covers the windows this run committed.
+Both go to sink mode ``sigmondb``, schema 1, with ``producer``
+``hfdl-recorder`` named on the writer: hs-uploader's SQL producer rule holds
+no hfdl entry.  Neither is local; ``squitter_timing`` stays local.  Each row
+carries the instance's ``reporter_id`` (``""`` when the config names none;
+wd30 then takes the tar's site).  A commit flushes all three writers and
+marks windows done only when none stays buffered, so no window counts as
+done before its arrival is durable.  A run that stops on its store still
+writes the captures of the windows it committed.  A row whose arrival cannot
+be built (a found squitter with no SNR, say) gives no arrival and counts in
+its capture as not found; the run logs one line for all such rows.
+
 Off the station (``sink=False``) the same code runs without sigmond: rows go
 to ``jsonl_path`` (appended) and/or ``csv_path`` (this run's rows), and a
 window gets its marker only after the file is written and fsynced.
@@ -65,6 +80,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from hfdl_recorder.timing import sigmondb_rows
 from hfdl_recorder.timing.analyzer import ANALYZER_VERSION, time_squitter
 
 logger = logging.getLogger(__name__)
@@ -80,6 +96,8 @@ EPOCH_TOL_S = 2.0                # anchor-implied epoch vs the window's own; the
                                  # tracker's skew allowance (B4 pairs reached 0.8 s)
 PLAUSIBLE_DELAY_S = (-0.030, 0.100)   # R12: outside this, a delay is not a squitter's
 REG_WAIT_S = 7200.0              # wait this long past nominal for a registration
+SIGMONDB_MODE = "sigmondb"
+SIGMONDB_PRODUCER = "hfdl-recorder"   # named: hs-uploader's SQL rule has no hfdl entry
 
 _GPS_UNIX_S = 315_964_800        # GPS epoch minus Unix epoch
 _GPS_LEAP_S = 18                 # GPS minus UTC
@@ -356,13 +374,16 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
               max_windows: int = DEFAULT_MAX_WINDOWS,
               csv_path=None, jsonl_path=None, sink: bool = True,
               writer_factory: Optional[Callable[..., object]] = None,
-              now: Optional[float] = None) -> dict:
+              now: Optional[float] = None,
+              reporter_id: Optional[str] = None) -> dict:
     """Analyse windows not yet marked done (by this analyser version);
     returns the run's counts.  ``counts["stopped"]`` says the run gave up on
     its store; the CLI exits non-zero then.
 
     ``sink=False`` needs ``csv_path`` or ``jsonl_path`` and never imports
-    sigmond.  With the sink, the files are an extra copy written at the end."""
+    sigmond.  With the sink, the files are an extra copy written at the end,
+    and sigmondb arrival and capture rows go to the sink under
+    ``reporter_id`` (``""`` when None)."""
     if not sink and not (csv_path or jsonl_path):
         raise ValueError("sink=False needs csv_path or jsonl_path")
     window_dir = Path(window_dir)
@@ -370,29 +391,41 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
     now = time.time() if now is None else float(now)
     counts = {"analysed": 0, "found": 0, "errors": 0, "skipped_done": 0,
               "skipped_since": 0, "deferred": 0, "awaiting_registration": 0,
-              "vanished": 0}
+              "vanished": 0, "arrivals": 0, "captures": 0}
+    reporter = reporter_id or ""
     vanished_sample: Optional[Path] = None
     rows: list[dict] = []
     pending: list[Path] = []        # inserted, not yet durable: no .done yet
+    pending_rows: list[dict] = []   # their rows, as the capture counts them
+    committed_rows: list[dict] = [] # rows of windows marked done this run
     writer = None
+    arrival_w = capture_w = None    # sigmondb writers, sink mode only
+    no_arrival = 0
+    no_arrival_sample: Optional[str] = None
     stopped = False
     if sink:
         factory = writer_factory or _default_writer_factory
     else:
         factory = lambda **kw: _FileSink(csv_path, jsonl_path)   # noqa: E731
 
+    def writers():
+        return [w for w in (writer, arrival_w, capture_w) if w is not None]
+
     def commit() -> bool:
-        """Flush; mark the pending windows done only if nothing stays buffered."""
-        try:
-            writer.flush()
-        except Exception as exc:
-            logger.error("%s flush raised %s: %s", "sink" if sink else "file",
-                         type(exc).__name__, exc)
-            if not sink:
-                return False
-        if getattr(writer, "buffered", 0):
+        """Flush every writer; mark the pending windows done only if none
+        stays buffered."""
+        for w in writers():
+            try:
+                w.flush()
+            except Exception as exc:
+                logger.error("%s flush raised %s: %s", "sink" if sink else "file",
+                             type(exc).__name__, exc)
+                if not sink:
+                    return False
+        left = sum(getattr(w, "buffered", 0) for w in writers())
+        if left:
             logger.error("flush left %d rows buffered; %d windows stay "
-                         "unmarked and run again", writer.buffered, len(pending))
+                         "unmarked and run again", left, len(pending))
             return False
         for p in pending:
             try:
@@ -400,7 +433,20 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
             except OSError as exc:
                 logger.warning("cannot mark %s done: %s", p, exc)
         pending.clear()
+        committed_rows.extend(pending_rows)
+        pending_rows.clear()
         return True
+
+    def arrival_of(row: dict, path: Path):
+        """(arrival or None, row as the capture counts it).  A row the
+        mapping refuses gives no arrival and counts as not found."""
+        nonlocal no_arrival, no_arrival_sample
+        try:
+            return sigmondb_rows.arrival_for(row, reporter), row
+        except Exception as exc:
+            no_arrival += 1
+            no_arrival_sample = no_arrival_sample or f"{path}: {type(exc).__name__}: {exc}"
+            return None, {**row, "found": False}
 
     for path in _windows(window_dir, radiod_id):
         v = _done_version(path)
@@ -418,7 +464,13 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
         if writer is None:
             writer = factory(table=TABLE, mode=MODE, schema_version=SCHEMA_VERSION,
                              batch_rows=500, local=True)
-            if getattr(writer, "is_noop", False):
+            if sink:
+                arrival_w, capture_w = (
+                    factory(table=t, mode=SIGMONDB_MODE,
+                            schema_version=sigmondb_rows.SCHEMA_VERSION,
+                            producer=SIGMONDB_PRODUCER, batch_rows=500)
+                    for t in ("arrival", "capture"))
+            if any(getattr(w, "is_noop", False) for w in writers()):
                 logger.error("sink writer is a no-op (sink path unwritable): "
                              "no rows stored, no windows marked done")
                 stopped = True
@@ -439,8 +491,11 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
                     and now - nominal < REG_WAIT_S):
                 counts["awaiting_registration"] += 1   # retried next run
                 continue
+        arrival, cap_row = arrival_of(row, path) if sink else (None, row)
         try:
             writer.insert([row])
+            if arrival is not None:
+                arrival_w.insert([arrival])
         except Exception as exc:     # BufferFull under a locked sink, say
             logger.error("sink insert raised %s: %s; stopping the run",
                          type(exc).__name__, exc)
@@ -448,6 +503,8 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
             break
         rows.append(row)
         pending.append(path)
+        pending_rows.append(cap_row)
+        counts["arrivals"] += arrival is not None
         counts["analysed"] += 1
         counts["found"] += bool(row["found"])
         if len(pending) >= FLUSH_EVERY and not commit():
@@ -457,8 +514,24 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
         try:
             if pending and not stopped and not commit():
                 stopped = True
+            if capture_w is not None and committed_rows:
+                # Even after a stop: these windows are done, so their
+                # capture is written now or never.
+                try:
+                    caps = sigmondb_rows.captures_for(committed_rows, reporter)
+                    capture_w.insert(caps)
+                    capture_w.flush()
+                    if getattr(capture_w, "buffered", 0):
+                        raise RuntimeError(f"{capture_w.buffered} rows stay buffered")
+                    counts["captures"] = len(caps)
+                except Exception as exc:
+                    logger.error("capture rows not stored (%s: %s); %d windows "
+                                 "keep no capture", type(exc).__name__, exc,
+                                 len(committed_rows))
+                    stopped = True
         finally:
-            writer.close()
+            for w in writers():
+                w.close()
     counts["stopped"] = stopped
     if sink and rows:
         try:
@@ -468,6 +541,9 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
                 _append_jsonl(jsonl_path, rows)
         except OSError as exc:
             logger.error("cannot write the row copy: %s", exc)
+    if no_arrival:
+        logger.warning("%d squitter rows gave no arrival (the mapping refused "
+                       "them); e.g. %s", no_arrival, no_arrival_sample)
     if counts["vanished"]:
         logger.info("%d windows vanished before they were read (pruned by the "
                     "window keeper); e.g. %s", counts["vanished"], vanished_sample)

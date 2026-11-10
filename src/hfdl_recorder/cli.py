@@ -18,6 +18,7 @@ import os
 import signal
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 def _resolve_log_level() -> int:
@@ -279,6 +280,17 @@ def _squitter_dir(args) -> Path:
         return Path(default)
 
 
+def _squitter_reporter_id(args) -> Optional[str]:
+    """The instance's [instance] reporter_id; None leaves the sigmondb rows'
+    reporter empty, and wd30 takes the tar's site."""
+    from hfdl_recorder.config import extract_reporter_id, resolve_config_path
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        path = resolve_config_path(instance=args.instance, explicit_path=args.config)
+    return extract_reporter_id(path)
+
+
 def _handle_squitter_analyze(args, parser) -> int:
     from hfdl_recorder.timing import batch
     if args.no_sink and not (args.csv or args.jsonl):
@@ -287,7 +299,7 @@ def _handle_squitter_analyze(args, parser) -> int:
         _squitter_dir(args), registration_dir=args.registration_dir,
         since=_parse_since(args.since), radiod_id=args.radiod_id,
         max_windows=args.max_windows, csv_path=args.csv, jsonl_path=args.jsonl,
-        sink=not args.no_sink)
+        sink=not args.no_sink, reporter_id=_squitter_reporter_id(args))
     return 1 if counts.get("stopped") else 0
 
 
