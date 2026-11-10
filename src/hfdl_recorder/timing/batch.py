@@ -23,8 +23,11 @@ wd30 then takes the tar's site).  A commit flushes all three writers and
 marks windows done only when none stays buffered, so no window counts as
 done before its arrival is durable.  A run that stops on its store still
 writes the captures of the windows it committed.  A row whose arrival cannot
-be built (a found squitter with no SNR, say) gives no arrival and counts in
-its capture as not found; the run logs one line for all such rows.
+be built (TypeError/ValueError: a found squitter with no SNR, say) gives no
+arrival and counts in its capture as not found; the run logs one WARNING for
+all such rows.  When every found squitter of a run fails so, the fault is
+the mapping's, not the rows': the run logs one ERROR and counts as stopped.
+Any other exception from the mapping propagates.
 
 Off the station (``sink=False``) the same code runs without sigmond: rows go
 to ``jsonl_path`` (appended) and/or ``csv_path`` (this run's rows), and a
@@ -400,7 +403,8 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
     committed_rows: list[dict] = [] # rows of windows marked done this run
     writer = None
     arrival_w = capture_w = None    # sigmondb writers, sink mode only
-    no_arrival = 0
+    no_arrival = 0                  # found rows the mapping refused
+    found_mapped = 0                # found rows offered to the mapping
     no_arrival_sample: Optional[str] = None
     stopped = False
     if sink:
@@ -439,11 +443,14 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
 
     def arrival_of(row: dict, path: Path):
         """(arrival or None, row as the capture counts it).  A row the
-        mapping refuses gives no arrival and counts as not found."""
-        nonlocal no_arrival, no_arrival_sample
+        mapping refuses (TypeError/ValueError: a found squitter with no SNR,
+        say) gives no arrival and counts as not found.  Any other exception
+        is a bug in the mapping and propagates."""
+        nonlocal no_arrival, no_arrival_sample, found_mapped
+        found_mapped += bool(row.get("found"))
         try:
             return sigmondb_rows.arrival_for(row, reporter), row
-        except Exception as exc:
+        except (TypeError, ValueError) as exc:
             no_arrival += 1
             no_arrival_sample = no_arrival_sample or f"{path}: {type(exc).__name__}: {exc}"
             return None, {**row, "found": False}
@@ -532,6 +539,16 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
         finally:
             for w in writers():
                 w.close()
+    if no_arrival and no_arrival == found_mapped:
+        # Every found squitter refused: a systematic mapping fault, not one
+        # bad row.  The captures would claim "listened, not heard" for the
+        # whole run, so the run fails loud.
+        logger.error("all %d found squitters gave no arrival (the mapping "
+                     "refused every one); first: %s", no_arrival, no_arrival_sample)
+        stopped = True
+    elif no_arrival:
+        logger.warning("%d squitter rows gave no arrival (the mapping refused "
+                       "them); e.g. %s", no_arrival, no_arrival_sample)
     counts["stopped"] = stopped
     if sink and rows:
         try:
@@ -541,9 +558,6 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
                 _append_jsonl(jsonl_path, rows)
         except OSError as exc:
             logger.error("cannot write the row copy: %s", exc)
-    if no_arrival:
-        logger.warning("%d squitter rows gave no arrival (the mapping refused "
-                       "them); e.g. %s", no_arrival, no_arrival_sample)
     if counts["vanished"]:
         logger.info("%d windows vanished before they were read (pruned by the "
                     "window keeper); e.g. %s", counts["vanished"], vanished_sample)

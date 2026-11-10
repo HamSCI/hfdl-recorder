@@ -656,3 +656,35 @@ def test_cli_passes_the_instance_reporter_id(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         cli.main()
     assert seen["reporter_id"] == "AC0G/B4"
+
+
+def test_an_unexpected_mapping_error_propagates(tmp_path, monkeypatch):
+    _window(tmp_path / "win", 0.0123)
+
+    def broken(row, reporter_id):
+        raise KeyError("gs_id")
+    monkeypatch.setattr(batch.sigmondb_rows, "arrival_for", broken)
+    with pytest.raises(KeyError):
+        _run(tmp_path)
+    assert _dones(tmp_path) == []
+
+
+def test_every_arrival_refused_stops_the_run_with_one_error(tmp_path, monkeypatch, caplog):
+    for i in range(3):
+        _window(tmp_path / "win", 0.0123, frame=i)
+    real = batch._row_for
+
+    def no_snr(path, regs):
+        row, missing = real(path, regs)
+        row["snr_db"] = None
+        return row, missing
+    monkeypatch.setattr(batch, "_row_for", no_snr)
+    fac = Factory()
+    with caplog.at_level("INFO", logger="hfdl_recorder.timing.batch"):
+        _, counts = _run(tmp_path, fac)
+    assert counts["stopped"] and len(_dones(tmp_path)) == 3
+    (c,) = fac.writers["capture"].inserts
+    assert c["n_expected"] == 3 and c["n_found"] == 0
+    errs = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errs) == 1 and "no arrival" in errs[0].getMessage()
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
