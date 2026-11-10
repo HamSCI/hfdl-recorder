@@ -25,8 +25,8 @@ done before its arrival is durable.  A run that stops on its store still
 writes the captures of the windows it committed.  A row whose arrival cannot
 be built (TypeError/ValueError: a found squitter with no SNR, say) gives no
 arrival and counts in its capture as not found; the run logs one WARNING for
-all such rows.  When every found squitter of a run fails so, the fault is
-the mapping's, not the rows': the run logs one ERROR and counts as stopped.
+all such rows.  When every found squitter of a run fails so, and there were
+at least two, the fault is the mapping's, not the rows': the run logs one ERROR and counts as stopped.
 Any other exception from the mapping propagates.
 
 Off the station (``sink=False``) the same code runs without sigmond: rows go
@@ -455,68 +455,80 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
             no_arrival_sample = no_arrival_sample or f"{path}: {type(exc).__name__}: {exc}"
             return None, {**row, "found": False}
 
-    for path in _windows(window_dir, radiod_id):
-        v = _done_version(path)
-        if v is not None and v >= ANALYZER_VERSION:
-            counts["skipped_done"] += 1
-            continue
-        if counts["analysed"] >= max_windows:
-            counts["deferred"] += 1
-            continue
-        if since is not None:
-            nominal = _meta_nominal(path)
-            if nominal is not None and nominal < since:
-                counts["skipped_since"] += 1
+    # Whatever ends the loop -- its end, a stop, or an exception from it --
+    # the committed windows still get their capture and the writers close;
+    # an exception is re-raised once the run has reported.  A window not
+    # yet committed never gets its marker.
+    raised: Optional[BaseException] = None
+    try:
+        for path in _windows(window_dir, radiod_id):
+            v = _done_version(path)
+            if v is not None and v >= ANALYZER_VERSION:
+                counts["skipped_done"] += 1
                 continue
-        if writer is None:
-            writer = factory(table=TABLE, mode=MODE, schema_version=SCHEMA_VERSION,
-                             batch_rows=500, local=True)
-            if sink:
-                arrival_w, capture_w = (
-                    factory(table=t, mode=SIGMONDB_MODE,
-                            schema_version=sigmondb_rows.SCHEMA_VERSION,
-                            producer=SIGMONDB_PRODUCER, batch_rows=500)
-                    for t in ("arrival", "capture"))
-            if any(getattr(w, "is_noop", False) for w in writers()):
-                logger.error("sink writer is a no-op (sink path unwritable): "
-                             "no rows stored, no windows marked done")
+            if counts["analysed"] >= max_windows:
+                counts["deferred"] += 1
+                continue
+            if since is not None:
+                nominal = _meta_nominal(path)
+                if nominal is not None and nominal < since:
+                    counts["skipped_since"] += 1
+                    continue
+            if writer is None:
+                writer = factory(table=TABLE, mode=MODE, schema_version=SCHEMA_VERSION,
+                                 batch_rows=500, local=True)
+                if sink:
+                    arrival_w, capture_w = (
+                        factory(table=t, mode=SIGMONDB_MODE,
+                                schema_version=sigmondb_rows.SCHEMA_VERSION,
+                                producer=SIGMONDB_PRODUCER, batch_rows=500)
+                        for t in ("arrival", "capture"))
+                if any(getattr(w, "is_noop", False) for w in writers()):
+                    logger.error("sink writer is a no-op (sink path unwritable): "
+                                 "no rows stored, no windows marked done")
+                    stopped = True
+                    break
+            try:
+                row, missing = _row_for(path, regs)
+            except FileNotFoundError:    # the keeper pruned it: expected, no row
+                counts["vanished"] += 1
+                vanished_sample = vanished_sample or path
+                continue
+            except Exception as exc:     # one bad file never stalls the batch
+                logger.warning("batch_error %s: %s: %s", path, type(exc).__name__, exc)
+                row, missing = _error_row(path, exc), False
+                counts["errors"] += 1
+            if missing and row.get("nominal_utc") is not None:
+                nominal = float(row["nominal_utc"])
+                if (not regs.newest_after(nominal + REG_MAX_AGE_S)
+                        and now - nominal < REG_WAIT_S):
+                    counts["awaiting_registration"] += 1   # retried next run
+                    continue
+            arrival, cap_row = arrival_of(row, path) if sink else (None, row)
+            try:
+                writer.insert([row])
+                if arrival is not None:
+                    arrival_w.insert([arrival])
+            except Exception as exc:     # BufferFull under a locked sink, say
+                logger.error("sink insert raised %s: %s; stopping the run",
+                             type(exc).__name__, exc)
                 stopped = True
                 break
-        try:
-            row, missing = _row_for(path, regs)
-        except FileNotFoundError:    # the keeper pruned it: expected, no row
-            counts["vanished"] += 1
-            vanished_sample = vanished_sample or path
-            continue
-        except Exception as exc:     # one bad file never stalls the batch
-            logger.warning("batch_error %s: %s: %s", path, type(exc).__name__, exc)
-            row, missing = _error_row(path, exc), False
-            counts["errors"] += 1
-        if missing and row.get("nominal_utc") is not None:
-            nominal = float(row["nominal_utc"])
-            if (not regs.newest_after(nominal + REG_MAX_AGE_S)
-                    and now - nominal < REG_WAIT_S):
-                counts["awaiting_registration"] += 1   # retried next run
-                continue
-        arrival, cap_row = arrival_of(row, path) if sink else (None, row)
-        try:
-            writer.insert([row])
-            if arrival is not None:
-                arrival_w.insert([arrival])
-        except Exception as exc:     # BufferFull under a locked sink, say
-            logger.error("sink insert raised %s: %s; stopping the run",
-                         type(exc).__name__, exc)
-            stopped = True
-            break
-        rows.append(row)
-        pending.append(path)
-        pending_rows.append(cap_row)
-        counts["arrivals"] += arrival is not None
-        counts["analysed"] += 1
-        counts["found"] += bool(row["found"])
-        if len(pending) >= FLUSH_EVERY and not commit():
-            stopped = True
-            break
+            rows.append(row)
+            pending.append(path)
+            pending_rows.append(cap_row)
+            counts["arrivals"] += arrival is not None
+            counts["analysed"] += 1
+            counts["found"] += bool(row["found"])
+            if len(pending) >= FLUSH_EVERY and not commit():
+                stopped = True
+                break
+    except Exception as exc:
+        raised = exc
+        stopped = True
+        logger.error("squitter-analyze raised %s: %s; writing the captures of "
+                     "%d committed windows, marking no more", type(exc).__name__,
+                     exc, len(committed_rows))
     if writer is not None:
         try:
             if pending and not stopped and not commit():
@@ -539,7 +551,7 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
         finally:
             for w in writers():
                 w.close()
-    if no_arrival and no_arrival == found_mapped:
+    if found_mapped >= 2 and no_arrival == found_mapped:
         # Every found squitter refused: a systematic mapping fault, not one
         # bad row.  The captures would claim "listened, not heard" for the
         # whole run, so the run fails loud.
@@ -562,4 +574,6 @@ def run_batch(window_dir, *, registration_dir=DEFAULT_REGISTRATION_DIR,
         logger.info("%d windows vanished before they were read (pruned by the "
                     "window keeper); e.g. %s", counts["vanished"], vanished_sample)
     logger.info("squitter-analyze: %s", counts)
+    if raised is not None:
+        raise raised
     return counts

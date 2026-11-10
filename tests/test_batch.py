@@ -688,3 +688,47 @@ def test_every_arrival_refused_stops_the_run_with_one_error(tmp_path, monkeypatc
     errs = [r for r in caplog.records if r.levelname == "ERROR"]
     assert len(errs) == 1 and "no arrival" in errs[0].getMessage()
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_a_mapping_error_after_a_commit_still_writes_its_captures(tmp_path, monkeypatch):
+    monkeypatch.setattr(batch, "FLUSH_EVERY", 2)
+    for i in range(5):
+        _window(tmp_path / "win", 0.0123, frame=i)
+    real = batch.sigmondb_rows.arrival_for
+
+    def breaks_on_frame_3(row, reporter_id):
+        if row.get("frame_index") == 3:
+            raise KeyError("gs_id")
+        return real(row, reporter_id)
+    monkeypatch.setattr(batch.sigmondb_rows, "arrival_for", breaks_on_frame_3)
+    fac = Factory()
+    with pytest.raises(KeyError):
+        _run(tmp_path, fac)
+    assert sorted(d.name for d in _dones(tmp_path)) == [
+        "7-8912-0.npz.done", "7-8912-1.npz.done"]
+    (c,) = fac.writers["capture"].inserts
+    assert c["n_expected"] == 2 and c["n_found"] == 2
+    assert all(w.closed for w in fac.writers.values())
+
+
+def _refuse_all(monkeypatch):
+    real = batch._row_for
+
+    def no_snr(path, regs):
+        row, missing = real(path, regs)
+        row["snr_db"] = None
+        return row, missing
+    monkeypatch.setattr(batch, "_row_for", no_snr)
+
+
+@pytest.mark.parametrize("n, stops", [(1, False), (2, True)])
+def test_all_refused_errors_only_from_two_found(tmp_path, monkeypatch, caplog, n, stops):
+    for i in range(n):
+        _window(tmp_path / "win", 0.0123, frame=i)
+    _refuse_all(monkeypatch)
+    with caplog.at_level("INFO", logger="hfdl_recorder.timing.batch"):
+        _, counts = _run(tmp_path)
+    assert counts["stopped"] is stops and len(_dones(tmp_path)) == n
+    lines = [r for r in caplog.records if "no arrival" in r.getMessage()]
+    assert len(lines) == 1
+    assert lines[0].levelname == ("ERROR" if stops else "WARNING")
