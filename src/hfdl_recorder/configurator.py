@@ -209,6 +209,28 @@ def _pick_radiod_status_from_discovery(
         print(f"\033[33m⚠\033[0m  Out of range; pick 1-{len(discovered)}.")
 
 
+COORDINATION_ENV = Path("/etc/sigmond/coordination.env")
+
+
+def _sigmond_radiods(env=None, coordination_env: Optional[Path] = None) -> list:
+    """Every radiod sigmond binds, when it names several.  sigmond then
+    leaves SIGMOND_RADIOD_STATUS empty and publishes RADIOD_*_STATUS: from
+    the environment, else from coordination.env, since an init elevated
+    through sudo may not carry the station's environment (AC0G-B2: B1A and
+    B1B on different antennas, 2026-11-12)."""
+    env = os.environ if env is None else env
+    pairs = {k: v for k, v in env.items() if k.startswith("RADIOD_") and k.endswith("_STATUS")}
+    if not pairs:
+        try:
+            for line in (coordination_env or COORDINATION_ENV).read_text().splitlines():
+                k, sep, v = line.partition("=")
+                if sep and k.startswith("RADIOD_") and k.endswith("_STATUS"):
+                    pairs[k] = v
+        except OSError:
+            pass
+    return sorted({v.strip().strip('"') for v in pairs.values() if v.strip()})
+
+
 def _collect_init_values(args) -> dict:
     grid = os.environ.get("STATION_GRID", "")
     instance = os.environ.get("SIGMOND_INSTANCE", "")
@@ -221,9 +243,13 @@ def _collect_init_values(args) -> dict:
     under_sigmond = "SIGMOND_RADIOD_COUNT" in os.environ
 
     if getattr(args, "non_interactive", False):
-        # Env wins; else single-radiod auto-pick; else placeholder.
+        # Env wins; else every radiod sigmond binds; else single-radiod
+        # auto-pick; else placeholder.
+        several = [] if status or not under_sigmond else _sigmond_radiods()
         if status:
             radiod_status = status
+        elif several:
+            radiod_status = several[0]
         else:
             discovered = _discover_radiods()
             if len(discovered) == 1:
@@ -237,6 +263,7 @@ def _collect_init_values(args) -> dict:
             "station_id":    default_station,
             "grid":          grid or "AA00aa",
             "radiod_status": radiod_status,
+            "radiod_statuses": several,
             "timing_squitters": under_sigmond,
         }
 
@@ -264,9 +291,36 @@ def _apply_init_substitutions(body: str, values: dict) -> str:
     # (multicast mDNS name).  The legacy `id` + `radiod_status` lines
     # are commented out in the template post-Phase 3.
     body = _replace_radiod_field(body, 0, "status", values["radiod_status"])
+    extra = list(values.get("radiod_statuses") or [])[1:]
+    if extra:
+        body = _repeat_radiod_block(body, extra)
     if values.get("timing_squitters"):
         body = _enable_timing_squitters(body)
     return body
+
+
+def _repeat_radiod_block(body: str, statuses: list) -> str:
+    """Append a copy of the first [[radiod]] block, with its [radiod.*]
+    sub-tables, for each further radiod.  Every copy keeps the template's
+    bands; the daemon for each radiod takes the block naming it."""
+    lines = body.splitlines(keepends=True)
+    start = next((i for i, l in enumerate(lines) if l.strip() == "[[radiod]]"), None)
+    if start is None:
+        return body
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        t = lines[i].strip()
+        if t.startswith("[") and t != "[[radiod]]" and not t.startswith("[radiod."):
+            end = i
+            break
+        if t == "[[radiod]]":
+            end = i
+            break
+    block = "".join(lines[start:end]).rstrip("\n") + "\n"
+    out = body.rstrip("\n") + "\n"
+    for st in statuses:
+        out += "\n" + _replace_radiod_field(block, 0, "status", st)
+    return out
 
 
 def _enable_timing_squitters(body: str) -> str:

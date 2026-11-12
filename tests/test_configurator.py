@@ -217,3 +217,48 @@ class EditCommandTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SeveralRadiodsTests(unittest.TestCase):
+    """AC0G-B2 reads B1A and B1B on different antennas (Michael, 2026-11-12).
+    With several radiods sigmond leaves SIGMOND_RADIOD_STATUS empty and
+    publishes RADIOD_*_STATUS; an unattended init writes one [[radiod]]
+    block for each, and each hfdl-recorder@<radiod> takes its own."""
+
+    def _init(self, env, coord_text=None):
+        import tomllib
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / 'cfg.toml'
+            coord = Path(d) / 'coordination.env'
+            if coord_text is not None:
+                coord.write_text(coord_text)
+            with mock.patch.dict(os.environ, env, clear=False), \
+                 mock.patch.object(configurator, 'COORDINATION_ENV', coord), \
+                 mock.patch.object(configurator, '_discover_radiods', return_value=[]):
+                for k in [k for k in os.environ if k.startswith('RADIOD_') and k not in env]:
+                    os.environ.pop(k, None)
+                if 'SIGMOND_RADIOD_STATUS' not in env:
+                    _clear_env('SIGMOND_RADIOD_STATUS')
+                rc = configurator.cmd_config_init(_ns(config=target, non_interactive=True))
+            self.assertEqual(rc, 0)
+            return tomllib.loads(target.read_text())
+
+    def test_one_block_per_bound_radiod(self):
+        cfg = self._init({'SIGMOND_RADIOD_COUNT': '2',
+                          'RADIOD_AC0G_B1_A_STATUS_LOCAL_STATUS': 'ac0g-b1-a-status.local',
+                          'RADIOD_AC0G_B1_B_STATUS_LOCAL_STATUS': 'ac0g-b1-b-status.local'})
+        self.assertEqual([b['status'] for b in cfg['radiod']],
+                         ['ac0g-b1-a-status.local', 'ac0g-b1-b-status.local'])
+        self.assertEqual(cfg['radiod'][0]['bands'], cfg['radiod'][1]['bands'])
+        self.assertIs(cfg['timing_squitters']['enabled'], True)
+
+    def test_radiods_come_from_coordination_env_when_the_environment_lacks_them(self):
+        cfg = self._init({'SIGMOND_RADIOD_COUNT': '2'},
+                         'RADIOD_X_STATUS=x-status.local\nRADIOD_Y_STATUS=y-status.local\n')
+        self.assertEqual([b['status'] for b in cfg['radiod']],
+                         ['x-status.local', 'y-status.local'])
+
+    def test_one_named_radiod_keeps_one_block(self):
+        cfg = self._init({'SIGMOND_RADIOD_COUNT': '1',
+                          'SIGMOND_RADIOD_STATUS': 'k3lr-status.local'})
+        self.assertEqual([b['status'] for b in cfg['radiod']], ['k3lr-status.local'])
