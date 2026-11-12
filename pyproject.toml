@@ -13,7 +13,7 @@ authors = [
 ]
 dependencies = [
     "hamsci-dsp>=0.8.0",
-    "ka9q-python>=3.22.0",
+    "ka9q-python>=3.27.0",
     "numpy>=1.24.0",
     "tomli>=2.0; python_version < '3.11'",
 ]
@@ -38,6 +38,6 @@ testpaths = ["tests"]
 # editable consumers" convention; see sigmond/CLAUDE.md "Fleet upgrade pattern".
 # Without this declaration, uv sync would resolve ka9q-python>=3.22.0 from
 # PyPI and replace the existing editable install with a wheel.  The base
-# "ka9q-python>=3.22.0" dependency above still controls what PyPI consumers get.
+# "ka9q-python>=3.27.0" dependency above still controls what PyPI consumers get.
 ka9q-python = { path = "../ka9q-python", editable = true }
 hamsci-dsp = { path = "../hamsci-dsp", editable = true }
