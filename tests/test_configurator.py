@@ -157,6 +157,33 @@ class InitCommandTests(unittest.TestCase):
             self.assertIn('status = "my-rx888-status.local"', text)
 
 
+class SquitterTimingUnderSigmondTests(unittest.TestCase):
+    """Michael, 2026-11-12: every sigmond station sends HFDL squitter timing to
+    sigmondb.  sigmond always sets SIGMOND_RADIOD_COUNT when it runs config
+    init, so an init it drives starts with timing on; standalone stays off."""
+
+    def _init(self, env):
+        import tomllib
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / 'cfg.toml'
+            with mock.patch.dict(os.environ, env, clear=False):
+                if 'SIGMOND_RADIOD_COUNT' not in env:
+                    _clear_env('SIGMOND_RADIOD_COUNT')
+                rc = configurator.cmd_config_init(
+                    _ns(config=target, non_interactive=True))
+            self.assertEqual(rc, 0)
+            return tomllib.loads(target.read_text())
+
+    def test_on_when_sigmond_drives_init(self):
+        cfg = self._init({'SIGMOND_RADIOD_COUNT': '1',
+                          'SIGMOND_RADIOD_STATUS': 'k3lr-status.local'})
+        self.assertIs(cfg['timing_squitters']['enabled'], True)
+
+    def test_off_standalone(self):
+        cfg = self._init({'SIGMOND_RADIOD_STATUS': 'k3lr-status.local'})
+        self.assertIs(cfg['timing_squitters']['enabled'], False)
+
+
 class EditCommandTests(unittest.TestCase):
     def _initial_config(self) -> str:
         return (

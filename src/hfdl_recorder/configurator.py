@@ -214,6 +214,11 @@ def _collect_init_values(args) -> dict:
     instance = os.environ.get("SIGMOND_INSTANCE", "")
     status = os.environ.get("SIGMOND_RADIOD_STATUS", "")
     default_station = _default_station_id() or "YOURCALL-1"
+    # sigmond sets SIGMOND_RADIOD_COUNT on every config init it drives.  Its
+    # stations all send squitter timing to sigmondb (Michael, 2026-11-12), so
+    # an init under sigmond starts with [timing_squitters] on; standalone, the
+    # template's off stands.
+    under_sigmond = "SIGMOND_RADIOD_COUNT" in os.environ
 
     if getattr(args, "non_interactive", False):
         # Env wins; else single-radiod auto-pick; else placeholder.
@@ -232,6 +237,7 @@ def _collect_init_values(args) -> dict:
             "station_id":    default_station,
             "grid":          grid or "AA00aa",
             "radiod_status": radiod_status,
+            "timing_squitters": under_sigmond,
         }
 
     station_id  = _prompt("station_id",
@@ -247,6 +253,7 @@ def _collect_init_values(args) -> dict:
         "station_id":    station_id,
         "grid":          grid_square,
         "radiod_status": radiod_status,
+        "timing_squitters": under_sigmond,
     }
 
 
@@ -257,7 +264,22 @@ def _apply_init_substitutions(body: str, values: dict) -> str:
     # (multicast mDNS name).  The legacy `id` + `radiod_status` lines
     # are commented out in the template post-Phase 3.
     body = _replace_radiod_field(body, 0, "status", values["radiod_status"])
+    if values.get("timing_squitters"):
+        body = _enable_timing_squitters(body)
     return body
+
+
+def _enable_timing_squitters(body: str) -> str:
+    """Set ``enabled = true`` in the ``[timing_squitters]`` table only."""
+    out, in_table = [], False
+    for line in body.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_table = stripped == "[timing_squitters]"
+        elif in_table and re.match(r"enabled\s*=", stripped):
+            line = re.sub(r"(enabled\s*=\s*)false", r"\1true", line, count=1)
+        out.append(line)
+    return "".join(out)
 
 
 def _radiod_blocks(config: dict) -> list[dict]:
