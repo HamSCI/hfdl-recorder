@@ -71,12 +71,13 @@ mode  = "0755"
 
 [systemd]
 units = []
-templated_units = ["hfdl-recorder@.service"]
-# The squitter batch analyser's units are linked by the install steps above
-# but not listed here: sigmond enables and starts what this table names, and
-# the analyser stays disabled.  Enable it per radiod, once [timing_squitters]
-# is on and windows accumulate:
-#   systemctl enable --now hfdl-recorder-squitters@<radiod>.timer
+templated_units = ["hfdl-recorder@.service", "hfdl-recorder-squitters@.timer"]
+# One instance per radiod named in hfdl-recorder-config.toml's [[radiod]] blocks
+# (placeholder skipped); sigmond starts hfdl-recorder@<radiod> and its squitter
+# timer.  Every sigmond station sends squitter timing to sigmondb (2026-11-12):
+# config init under sigmond turns [timing_squitters] on.  With it off the batch
+# finds no windows and exits, so the timer costs nothing.
+instances_from = "config-radiods"
 
 # sigmondb rows -> wd30 in their own tars, never a spot tar.  sigmond renders this
 # only for an hs-uploader that offers "sigmondb-tar".

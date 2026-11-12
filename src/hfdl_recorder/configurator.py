@@ -46,9 +46,15 @@ def _find_template() -> Optional[Path]:
 def cmd_config_init(args) -> int:
     target = _resolve_target(args)
     if target.exists() and not getattr(args, "reconfig", False):
-        _err(f"{target} already exists.  Pass --reconfig to overwrite, or "
-             f"run `hfdl-recorder config edit` instead.")
-        return 1
+        if not _is_unconfigured(target):
+            _err(f"{target} already exists.  Pass --reconfig to overwrite, or "
+                 f"run `hfdl-recorder config edit` instead.")
+            return 1
+        # install.sh leaves the template; its placeholder radiod means nobody
+        # configured it (AC1SN, SIGMA, 2026-11-12).  Keep a copy, then write.
+        import shutil
+        shutil.copy2(target, target.with_name(target.name + ".bak"))
+        _info(f"{target} still names no radiod; configuring it (copy in .bak)")
 
     template = _find_template()
     if template is None:
@@ -210,6 +216,23 @@ def _pick_radiod_status_from_discovery(
 
 
 COORDINATION_ENV = Path("/etc/sigmond/coordination.env")
+
+
+_PLACEHOLDER_STATUS = "<configure-via-config-init>"
+
+
+def _is_unconfigured(path: Path) -> bool:
+    """True when the file has [[radiod]] blocks and every status in them is
+    still the install placeholder: the template install.sh left.  A file
+    with no radiod block is somebody's work, not the template."""
+    try:
+        import tomllib
+        data = tomllib.loads(path.read_text())
+    except Exception:  # noqa: BLE001 -- unreadable stays "configured": never clobber
+        return False
+    blocks = _radiod_blocks(data)
+    statuses = [str(b.get("status", "")).strip() for b in blocks if isinstance(b, dict)]
+    return bool(statuses) and all(st == _PLACEHOLDER_STATUS for st in statuses)
 
 
 def _sigmond_radiods(env=None, coordination_env: Optional[Path] = None) -> list:

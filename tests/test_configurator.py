@@ -262,3 +262,37 @@ class SeveralRadiodsTests(unittest.TestCase):
         cfg = self._init({'SIGMOND_RADIOD_COUNT': '1',
                           'SIGMOND_RADIOD_STATUS': 'k3lr-status.local'})
         self.assertEqual([b['status'] for b in cfg['radiod']], ['k3lr-status.local'])
+
+
+class InstallerTemplateTests(unittest.TestCase):
+    """install.sh leaves the template in place, so an unattended init refused
+    ("already exists") and squitter timing stayed off (AC1SN, SIGMA,
+    2026-11-12).  A config whose radiod is still the placeholder is
+    unconfigured: init writes over it and keeps a .bak.  A configured one
+    still needs --reconfig."""
+
+    def _run(self, existing):
+        import tomllib
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / 'cfg.toml'
+            target.write_text(existing)
+            with mock.patch.dict(os.environ, {'SIGMOND_RADIOD_COUNT': '1',
+                                              'SIGMOND_RADIOD_STATUS': 'ac1sn-status.local'}), \
+                 mock.patch.object(configurator, '_discover_radiods', return_value=[]):
+                rc = configurator.cmd_config_init(_ns(config=target, non_interactive=True))
+            bak = target.with_name(target.name + '.bak')
+            return rc, tomllib.loads(target.read_text()), bak.exists()
+
+    def test_the_installer_template_is_written_over(self):
+        template = (REPO_ROOT / 'config' / 'hfdl-recorder-config.toml.template').read_text()
+        rc, cfg, bak = self._run(template)
+        self.assertEqual(rc, 0)
+        self.assertEqual([b['status'] for b in cfg['radiod']], ['ac1sn-status.local'])
+        self.assertIs(cfg['timing_squitters']['enabled'], True)
+        self.assertTrue(bak)
+
+    def test_a_configured_file_is_still_refused(self):
+        rc, cfg, bak = self._run('[station]\nstation_id = "X"\n\n[[radiod]]\nstatus = "real-status.local"\n')
+        self.assertEqual(rc, 1)
+        self.assertEqual(cfg['radiod'][0]['status'], 'real-status.local')
+        self.assertFalse(bak)
