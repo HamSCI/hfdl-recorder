@@ -30,7 +30,7 @@ ORIGIN = "t6_anchor"
 
 ARRIVAL_COLUMNS = (
     "time", "reporter_id", "tx_id", "group_key", "centre_hz", "rate_hz_per_s", "delay_ns",
-    "delay_sigma_ns", "level_db", "margin_db", "half_band_db", "clean_tag", "doppler_hz",
+    "delay_sigma_ns", "freq_hz", "level_db", "margin_db", "half_band_db", "clean_tag", "doppler_hz",
     "phase_rate", "carrier_phase_rad", "s4", "sigma_phi_rad", "detector_version",
     "schema_version", "u_epoch_ns", "k", "p", "a_level", "a_level_provenance",
     "counter_epoch_id", "origin", "engineering")
@@ -113,7 +113,7 @@ def arrival_for(row: dict, reporter_id: str) -> Optional[dict]:
         time=utc_iso(row["nominal_utc"]), reporter_id=reporter_id,
         tx_id=f"hfdl:{int(row['gs_id'])}", group_key=f"hfdl {int(row['freq_khz'])} kHz",
         centre_hz=row["freq_khz"] * 1e3, rate_hz_per_s=0, delay_ns=round(delay * 1e9),
-        delay_sigma_ns=None, level_db=float(row["snr_db"]), margin_db=None, half_band_db=None,
+        delay_sigma_ns=None, freq_hz=None, level_db=float(row["snr_db"]), margin_db=None, half_band_db=None,
         clean_tag="squitter", doppler_hz=None if doppler is None else float(doppler),
         phase_rate=None, carrier_phase_rad=None, s4=None, sigma_phi_rad=None,
         detector_version=_detector(row), schema_version=SCHEMA_VERSION, engineering=eng,
