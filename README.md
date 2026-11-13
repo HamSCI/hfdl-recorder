@@ -107,8 +107,9 @@ sudo systemctl start hfdl-recorder@<radiod-id>
 tail -f /var/lib/hfdl-recorder/<radiod-id>/HFDL13.json
 ```
 
-Under sigmond, hfdl-recorder belongs to the dasi2 profile's core
-clients, so `smd bringup dasi2` installs it and runs `config init`.
+Under sigmond, hfdl-recorder belongs to the `dasi2` and `client`
+profiles, so `smd bringup dasi2` (or `client`) installs it and runs
+`config init`.
 That init writes one `[[radiod]]` block for each radiod sigmond binds
 and turns squitter timing on.  It overwrites only a new file or the
 installer's untouched template (keeping a `.bak`); a config that names
