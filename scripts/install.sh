@@ -99,10 +99,10 @@ if ! id -u "$SERVICE_USER" &>/dev/null; then
             "$SERVICE_USER"
 fi
 
-# Add the service user to the sigmond supplementary group so the spot
-# tailer and the squitter batch can write /var/lib/sigmond/sink.db
+# Add the service user to the sigmond supplementary group so the
+# squitter timing batch can write /var/lib/sigmond/sink.db
 # (root:sigmond 0664, dir 2775) and /var/lib/hs-uploader.  Without it every
-# hfdl.spots insert fails "attempt to write a readonly database".  The
+# hfdl.squitter_timing insert fails "attempt to write a readonly database".  The
 # sigmond group comes from sigmond/install.sh; if it has not run yet, skip
 # -- re-run this installer afterwards.  (Same as psk-recorder.)
 if getent group sigmond &>/dev/null; then
@@ -152,8 +152,8 @@ UV_PROJECT_ENVIRONMENT="$VENV_DIR" \
     uv sync --project "$REPO_SOURCE" --frozen --no-dev --quiet
 
 # sigmond is the host-wide orchestrator; hfdl-recorder lazy-imports
-# sigmond.hamsci_sink.Writer in core/ch_tailer.py for the hfdl.spots
-# SQLite sink (with a no-op fallback when absent).  Not declared in
+# sigmond.hamsci_sink.Writer in core/ch_tailer.py for the
+# SQLite sink (squitter timing; decoded messages are no longer staged) (with a no-op fallback when absent).  Not declared in
 # hfdl-recorder's pyproject so uv sync doesn't install it; explicit
 # uv pip install when the sibling exists.  uv pip install needs
 # --python (UV_PROJECT_ENVIRONMENT only applies to project commands

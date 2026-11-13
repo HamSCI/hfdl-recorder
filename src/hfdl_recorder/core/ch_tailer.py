@@ -4,8 +4,12 @@ Watches the per-band JSON spool that `dumphfdl` writes via
 `--output decoded:json:file:path=<path>` (one compact JSON object per
 line, terminated with `\\n` — see ka9q/dumphfdl `fmtr-json.c:55` /
 `EOL(vstr)`).  Parses each new frame, extracts the high-signal fields,
-preserves the raw JSON for a future re-parse, and inserts rows into
-`hfdl.spots` via `sigmond.hamsci_sink.Writer.from_env()`.
+and preserves the raw JSON for a future re-parse.  Decoded messages are
+not stored in the sink (Michael, 2026-11-13): the daemon builds the
+tailer with `stage_spots=False`.  dumphfdl keeps its per-band JSON spool
+and feeds airframes.io only when the operator opts in.  SPDU frames
+still reach `on_squitter`, so squitter timing still goes to sigmondb.
+The optional staging path below applies only when `stage_spots=True`.
 
 Runs as a daemon thread inside the HfdlRecorder process, parallel to
 dumphfdl's own optional airframes.io TCP feed (which is not affected
@@ -33,7 +37,7 @@ logger = logging.getLogger(__name__)
 # ── Frame parser ────────────────────────────────────────────────────────────
 
 # Keys we recognize at any depth inside the libacars-emitted PDU tree.
-# Mapping: libacars-key → hfdl.spots column.  Unknown keys are ignored.
+# Mapping: libacars-key → hfdl.spots column (staging is off by default).  Unknown keys are ignored.
 _INTERESTING_KEYS = {
     "icao":           "icao_addr",       # ICAO 24-bit address (int)
     "icao_address":   "icao_addr",       # alt. spelling some payloads use

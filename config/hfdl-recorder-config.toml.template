@@ -3,7 +3,7 @@
 
 [station]
 # This station's identity: dumphfdl --station-id, and the station named in
-# the local JSON and in the hfdl.spots rows.  Any unique string works (e.g.
+# the local JSON spool (decoded messages are not stored in the sink).  Any unique string works (e.g.
 # your callsign).  The airframes.io feed takes its own name, below
 # (sinks.airframes_station_id), so leave this one alone when you turn it on.
 station_id  = "YOURCALL-1"

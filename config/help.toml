@@ -26,7 +26,7 @@
 [station.station_id]
 title          = "PSWS station_id (should equal reporter_id)"
 help           = """The station identity embedded in dumphfdl's
---station-id flag and in the local JSON and hfdl.spots rows.  The
+--station-id flag and in the local JSON spool (decoded messages are not stored in the sink).  The
 airframes.io feed uses sinks.airframes_station_id instead.
 
 By convention, hfdl-recorder's station_id MUST equal this instance's
