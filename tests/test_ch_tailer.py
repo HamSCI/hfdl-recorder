@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import time
 import unittest
 from datetime import datetime
@@ -330,6 +331,47 @@ class TestOnSquitter(unittest.TestCase):
                           band_name="HFDL21", radiod_id="test-rx888",
                           writer_factory=broken_factory, on_squitter=got.append)
         tailer._consume(LINE_SPDU + "\n")
+        self.assertEqual(len(got), 1)
+
+
+class TestStageSpotsOff(unittest.TestCase):
+    """stage_spots=False: no sink writer, squitters still delivered."""
+
+    def test_writer_factory_never_called_and_spdu_delivered(self):
+        calls = []
+        got = []
+
+        def factory(batch_rows):
+            calls.append(batch_rows)
+            return FakeWriter()
+
+        with tempfile.TemporaryDirectory() as d:
+            jp = Path(d) / "HFDL21.json"
+            tailer = ChTailer(json_path=jp, band_name="HFDL21",
+                              radiod_id="test-rx888", writer_factory=factory,
+                              on_squitter=got.append, stage_spots=False)
+            tailer.start()
+            try:
+                self.assertEqual(calls, [])
+                self.assertIsNone(tailer._writer)
+                self.assertEqual(tailer.health, "noop")
+                tailer._consume(LINE_SPDU + "\n")
+            finally:
+                tailer.stop()
+        self.assertEqual(calls, [])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["hfdl"]["spdu"]["src"]["id"], 11)
+
+    def test_poll_once_reads_without_a_writer(self):
+        got = []
+        with tempfile.TemporaryDirectory() as d:
+            jp = Path(d) / "HFDL21.json"
+            tailer = ChTailer(json_path=jp, band_name="HFDL21",
+                              radiod_id="test-rx888", on_squitter=got.append,
+                              stage_spots=False)
+            tailer._poll_once()                    # no file yet: no error
+            jp.write_text(LINE_SPDU + "\n")
+            tailer._poll_once()
         self.assertEqual(len(got), 1)
 
 

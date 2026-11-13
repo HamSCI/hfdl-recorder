@@ -155,3 +155,34 @@ def test_anchor_carries_channel_chain_delay(tmp_path):
     assert pipeline.chain_delay_correction_ns is None
     pipeline._on_stream_restored(SimpleNamespace(ssrc=0x10, chain_delay_correction_ns=1234))
     assert pipeline.chain_delay_correction_ns == 1234
+
+
+def test_ch_tailers_do_not_stage_spots(tmp_path, monkeypatch):
+    from hfdl_recorder.core import daemon as daemon_mod
+    built = []
+
+    class _Spy:
+        def __init__(self, **kw):
+            built.append(kw)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(daemon_mod, "ChTailer", _Spy)
+    rec, _pipeline, _ = _built(tmp_path, 0x10)
+    rec._start_ch_tailers()
+    assert len(built) == 1
+    assert built[0]["stage_spots"] is False
+    assert built[0]["on_squitter"] is not None
+
+
+def test_no_ch_tailer_without_keepers(tmp_path, monkeypatch):
+    from hfdl_recorder.core import daemon as daemon_mod
+    built = []
+    monkeypatch.setattr(daemon_mod, "ChTailer",
+                        lambda **kw: built.append(kw))
+    rec = HfdlRecorder(_config(tmp_path, False), {"status": "x.local"})
+    rec._pipelines.append(BandPipeline(band=HFDL_BANDS["HFDL13"],
+                                       radiod_id="x.local", config=rec._config))
+    rec._start_ch_tailers()
+    assert built == [] and rec._ch_tailers == []

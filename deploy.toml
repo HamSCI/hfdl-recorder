@@ -137,13 +137,12 @@ remote_path = "upload"
 base = 2.0
 cap_sec = 900.0
 
-# CONTRACT v0.6 §17 — local sink for `hfdl.spots`.  An in-process
-# tailer thread parses the JSON-per-line file dumphfdl writes at
-# `/var/lib/hfdl-recorder/<radiod_id>/<band>.json` and stages parsed
-# rows into sigmond's local SQLite sink (drained upstream by
-# hs-uploader).  dumphfdl's optional airframes.io TCP feed (via its
-# own --output spec) is unaffected — the tailer reads the local file,
-# not the TCP socket.
+# CONTRACT v0.6 §17 — decoded messages are not stored in the sink
+# (Michael, 2026-11-13).  dumphfdl still writes its per-band JSON spool
+# at `/var/lib/hfdl-recorder/<radiod_id>/<band>.json` and feeds
+# airframes.io only when the operator opts in.  An in-process tailer
+# thread reads that file and passes SPDU frames to the squitter
+# keepers; squitter timing rows still go to sigmondb.
 
 [deps]
 [[deps.binary]]

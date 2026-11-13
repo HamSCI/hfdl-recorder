@@ -273,6 +273,7 @@ class ChTailer:
         reporter_id: Optional[str] = None,
         station_id: Optional[str] = None,
         on_squitter: Optional[Callable[[dict], None]] = None,
+        stage_spots: bool = True,
     ) -> None:
         self._json_path = Path(json_path)
         self._band_name = band_name
@@ -290,6 +291,10 @@ class ChTailer:
         self._batch_rows = batch_rows
         self._writer_factory = writer_factory or _default_writer_factory
         self._writer = None
+        # False: never open the sink writer; decoded messages are not
+        # staged (Michael, 2026-11-13).  Frames are still read, and SPDU
+        # frames still reach on_squitter.
+        self._stage_spots = stage_spots
         # Optional: called with each parsed frame that carries an SPDU
         # (the squitter window keeper learns ground stations from these).
         self._on_squitter = on_squitter
@@ -301,15 +306,22 @@ class ChTailer:
         self._partial = ""
 
     def start(self) -> None:
-        try:
-            self._writer = self._writer_factory(self._batch_rows)
-        except Exception as e:
-            if self._on_squitter is None:
-                logger.warning("ch_tailer disabled (band=%s): %s", self._band_name, e)
-                return
-            logger.warning("ch_tailer band=%s: no spot rows (%s); still "
-                           "reading squitters", self._band_name, e)
-            self._writer = None
+        if self._stage_spots:
+            try:
+                self._writer = self._writer_factory(self._batch_rows)
+            except Exception as e:
+                if self._on_squitter is None:
+                    logger.warning("ch_tailer disabled (band=%s): %s",
+                                   self._band_name, e)
+                    return
+                logger.warning("ch_tailer band=%s: no spot rows (%s); still "
+                               "reading squitters", self._band_name, e)
+                self._writer = None
+        elif self._on_squitter is None:
+            logger.warning("ch_tailer disabled (band=%s): nothing to do "
+                           "(no spot staging, no squitter consumer)",
+                           self._band_name)
+            return
         if self._writer is not None and self._writer.is_noop:
             logger.debug("ch_tailer band=%s: sink writer is a no-op "
                          "(sink path unwritable)", self._band_name)

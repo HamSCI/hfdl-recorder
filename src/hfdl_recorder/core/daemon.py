@@ -343,13 +343,22 @@ class HfdlRecorder:
     def _start_ch_tailers(self) -> None:
         """Start one ChTailer per enabled band — CONTRACT v0.6 §17.
 
-        Each tailer watches the per-band JSON spool dumphfdl writes
-        and stages parsed frames into `hfdl.spots` via sigmond's local
-        SQLite sink.  Resolves to a no-op when the sink path is
-        unwritable.  Failure to import / start is non-fatal: dumphfdl's
-        own outputs (local JSON, optional airframes.io TCP) are
-        unaffected.
+        Each tailer watches the per-band JSON spool dumphfdl writes and
+        hands SPDU frames to the squitter keepers.  It does NOT stage
+        decoded messages into `hfdl.spots` (Michael, 2026-11-13), so a
+        band with no keeper gets no tailer.  Failure to import / start
+        is non-fatal: dumphfdl's own outputs (local JSON, optional
+        airframes.io TCP) are unaffected.
         """
+        if not self._keepers:
+            logger.info(
+                "ch_tailer: no squitter keepers, so no tailers; decoded "
+                "messages are not staged in the sink (Michael 2026-11-13); "
+                "squitter timing is unaffected")
+            return
+        logger.info(
+            "ch_tailer: decoded messages are not staged in the sink "
+            "(Michael 2026-11-13); squitter timing is unaffected")
         from pathlib import Path as _Path
         paths = self._config.get("paths", {})
         spool_dir = _Path(paths.get("spool_dir", "/var/lib/hfdl-recorder"))
@@ -382,7 +391,8 @@ class HfdlRecorder:
                     host_call=host_call,
                     host_grid=host_grid,
                     processing_version=proc_version,
-                    on_squitter=self._note_squitter if self._keepers else None,
+                    on_squitter=self._note_squitter,
+                    stage_spots=False,
                 )
                 tailer.start()
                 self._ch_tailers.append(tailer)

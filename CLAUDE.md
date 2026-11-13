@@ -81,8 +81,8 @@ hfdl-recorder daemon (one per radiod, = one systemd instance)
   └─ ... one per enabled band
   │
   └─ ChTailer(HFDL21..) — one daemon thread per band; tails the per-band
-       JSON spool and inserts parsed frames into hfdl.spots via
-       sigmond.hamsci_sink.Writer.from_env() (local SQLite sink)
+       JSON spool and hands SPDU frames to the squitter keepers; it does
+       not stage decoded messages in the sink (Michael 2026-11-13)
 ```
 
 The daemon requests `F32LE` IQ from radiod (`encoding=4`) even though the
@@ -104,7 +104,7 @@ src/hfdl_recorder/
   core/
     daemon.py         # HfdlRecorder: orchestrates per-band pipelines
     band_pipeline.py  # BandPipeline: ka9q subscription + dumphfdl Popen
-    ch_tailer.py      # ChTailer: tails per-band JSON spool → hfdl.spots
+    ch_tailer.py      # ChTailer: tails per-band JSON spool → squitter keepers (no hfdl.spots)
     feed.py           # build dumphfdl --output argv from [sinks]
     radiod.py         # ensure_channel() wrapper
   timing/             # squitter timing (off by default: [timing_squitters])
@@ -159,14 +159,17 @@ deploy.toml           # Sigmond deploy manifest
   `sinks.airframes_io` defaults false; extra TCP/UDP sinks via the
   `sinks.extra` array.  The feed's station name lives in
   `sinks.airframes_station_id`, so turning it on never renames the
-  station in `hfdl.spots` (ChTailer stamps rows with `station.station_id`).
-- **Spot tailer feeds `hfdl.spots`** — `core/ch_tailer.py` runs one
-  daemon thread per band that tails the per-band JSON spool and inserts
-  parsed frames via `sigmond.hamsci_sink.Writer.from_env()`, which stages
-  rows into sigmond's local SQLite sink (`/var/lib/sigmond/sink.db`) by
-  default. It resolves to a no-op only when the sink path is unwritable.
-  Independent of dumphfdl's own airframes.io TCP feed (which is
-  dumphfdl-internal).
+  station in the local JSON spool.
+- **Decoded messages are not stored in the sink** — since 2026-11-13
+  (Michael) the daemon passes `stage_spots=False`, so `hfdl.spots` rows
+  are no longer written (on AC0G/B4 they held 266,854 rows / 474 MB of
+  a 1 GB sink, and nothing shipped them). `core/ch_tailer.py` still runs
+  one daemon thread per band that tails the per-band JSON spool and
+  passes SPDU frames to `on_squitter`; with no squitter keepers, the
+  daemon builds no tailer. dumphfdl still writes its per-band JSON spool
+  and feeds airframes.io only when the operator opts in
+  (`airframes_io = true`). Squitter timing rows
+  (`hfdl.squitter_timing`) still go to sigmondb.
 
 ## Client contract (v0.8)
 
@@ -191,8 +194,8 @@ Sections implemented:
   SSRC-collision check, since HFDL bands aren't keyed by SSRC).
 - **§14** — `config init`/`edit` via `configurator.py`
   (whiptail wizard + `sigmond.wizard_dispatch`).
-- **§17** — `ChTailer` parses dumphfdl JSON frames into `hfdl.spots`
-  rows in sigmond's local SQLite sink.
+- **§17** — `ChTailer` reads dumphfdl JSON frames for the squitter
+  keepers; decoded messages are not stored in the sink (2026-11-13).
 - **§18 (timing authority)** — capability boolean declared in the
   inventory; `timing_authority_applied` always `null` (RTP-default
   mode; no §18 subscriber wired yet).

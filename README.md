@@ -56,7 +56,7 @@ known**.
                                                                                           │
                                                                                           ├──► /var/lib/hfdl-recorder/<rid>/<band>.json   (always-on)
                                                                                           ├──► feed.airframes.io:5556 over TCP            (opt-in)
-                                                                                          └──► hfdl.spots in sigmond's local SQLite sink  (always-on when writable)
+                                                                                          └──► (decoded messages are not stored in the sink)
 ```
 
 `dumphfdl` performs HFDL waveform demodulation (M-PSK + forward
@@ -149,7 +149,7 @@ Setup:
    ```
 
    Leave `[station] station_id` as it is: it names the station in the
-   local JSON and in the `hfdl.spots` rows, which keep it while
+   local JSON, while
    dumphfdl reports `airframes_station_id` to airframes.io.
 4. **Validate and restart**:
 
