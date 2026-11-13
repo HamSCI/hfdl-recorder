@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -80,14 +81,15 @@ def test_keeps_newest_n_per_band(tmp_path):
 def test_error_logs_and_continues(tmp_path, caplog, monkeypatch):
     _spool(tmp_path, "HFDL21")
     p2 = _spool(tmp_path, "HFDL13")
-    real = gzip.open
+    real = gzip.GzipFile
 
-    def boom(path, *a, **kw):
-        if "HFDL21" in str(path):
+    def boom(*a, **kw):
+        if "HFDL21" in str(kw.get("filename", "")) or \
+                "HFDL21" in str(getattr(kw.get("fileobj"), "name", "")):
             raise OSError("disk full")
-        return real(path, *a, **kw)
+        return real(*a, **kw)
 
-    monkeypatch.setattr(gzip, "open", boom)
+    monkeypatch.setattr(gzip, "GzipFile", boom)
     with caplog.at_level(logging.WARNING):
         _rot(tmp_path, bands=("HFDL21", "HFDL13")).rotate_once()
     assert any("HFDL21" in r.message and r.levelno == logging.WARNING
@@ -120,3 +122,79 @@ def test_tailer_follows_a_truncation_without_rereading(tmp_path):
         f.write(LINE_SPDU + "\n")
     t._poll_once()
     assert len(got) == 3                         # new frame not skipped
+
+
+def _line(when):
+    return json.dumps({"hfdl": {"t": {"sec": int(when.timestamp()),
+                                      "usec": 0}}}) + "\n"
+
+
+def test_first_line_date_beats_todays_mtime(tmp_path):
+    # Busy band: mtime is already today, content starts yesterday.
+    p = _spool(tmp_path, text=_line(YESTERDAY) + _line(NOW), when=NOW)
+    _rot(tmp_path).rotate_once()
+    gz = tmp_path / "rid" / "HFDL21.json.20261112.gz"
+    assert b"\n" in gzip.decompress(gz.read_bytes())
+    assert p.stat().st_size == 0
+
+
+def test_file_written_across_midnight_rotates_once(tmp_path):
+    clock = [datetime(2026, 11, 12, 20, 0, tzinfo=timezone.utc)]
+    p = _spool(tmp_path, text=_line(clock[0]), when=clock[0])
+    r = SpoolRotator(tmp_path / "rid", ["HFDL21"], keep_days=3,
+                     now_fn=lambda: clock[0])
+    r.rotate_once()                       # day 1: nothing to rotate
+    assert not list(p.parent.glob("*.gz"))
+    for hh in (23, 24, 25, 26):           # a frame every hour, checks too
+        clock[0] = datetime(2026, 11, 12, 0, 0, tzinfo=timezone.utc) \
+            .replace(day=12 + hh // 24, hour=hh % 24, minute=1)
+        with open(p, "a") as f:
+            f.write(_line(clock[0]))
+        os.utime(p, (clock[0].timestamp(),) * 2)
+        r.rotate_once()
+    assert [f.name for f in p.parent.glob("*.gz")] == \
+        ["HFDL21.json.20261112.gz"]
+
+
+def test_truncate_failure_removes_archive_and_backs_off(tmp_path, caplog,
+                                                        monkeypatch):
+    p = _spool(tmp_path)
+    calls = []
+
+    def bad(path, n):
+        calls.append(path)
+        raise PermissionError("nope")
+
+    monkeypatch.setattr(os, "truncate", bad)
+    r = _rot(tmp_path)
+    with caplog.at_level(logging.WARNING):
+        r.rotate_once()
+        r.rotate_once()
+        r.rotate_once()
+    assert not list(p.parent.glob("*.gz*"))       # no archive left behind
+    assert len(calls) == 1                         # one attempt per day
+    assert sum(r_.levelno == logging.WARNING for r_ in caplog.records) == 1
+    assert p.read_text() == "a\nb\n"
+
+
+def test_prune_orders_collisions_by_date_then_number(tmp_path):
+    d = tmp_path / "rid"
+    d.mkdir()
+    names = ["20261111", "20261112", "20261112.1", "20261112.2",
+             "20261112.10", "20261110"]
+    for n in names:
+        (d / f"HFDL21.json.{n}.gz").write_bytes(b"x")
+    _rot(tmp_path, keep=3).rotate_once()
+    assert sorted(f.name for f in d.glob("*.gz")) == [
+        "HFDL21.json.20261112.1.gz", "HFDL21.json.20261112.10.gz",
+        "HFDL21.json.20261112.2.gz"]
+
+
+def test_leftover_tmp_cleaned_at_startup(tmp_path):
+    d = tmp_path / "rid"
+    d.mkdir()
+    (d / "HFDL21.json.20261111.gz.tmp").write_bytes(b"partial")
+    (d / "HFDL5.json.20261111.gz.tmp").write_bytes(b"other band")
+    _rot(tmp_path)
+    assert not (d / "HFDL21.json.20261111.gz.tmp").exists()
+    assert (d / "HFDL5.json.20261111.gz.tmp").exists()
