@@ -186,3 +186,14 @@ def test_no_ch_tailer_without_keepers(tmp_path, monkeypatch):
                                        radiod_id="x.local", config=rec._config))
     rec._start_ch_tailers()
     assert built == [] and rec._ch_tailers == []
+
+
+def test_spool_rotator_uses_spool_keep_days(tmp_path):
+    rec = HfdlRecorder(_config(tmp_path, False), {"status": "x.local"})
+    rec._pipelines.append(BandPipeline(band=HFDL_BANDS["HFDL13"],
+                                       radiod_id="x.local", config=rec._config))
+    rot = rec._build_spool_rotator()
+    assert rot.keep_days == 3                    # default
+    assert rot.spool_dir == tmp_path / "x.local"
+    rec._config["paths"]["spool_keep_days"] = 7
+    assert rec._build_spool_rotator().keep_days == 7

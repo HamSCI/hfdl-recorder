@@ -13,6 +13,9 @@ grid_square = "AA00aa"
 dumphfdl  = "/opt/git/sigmond/hfdl-recorder/bin/dumphfdl"
 spool_dir = "/var/lib/hfdl-recorder"
 log_dir   = "/var/log/hfdl-recorder"
+# The daemon rotates dumphfdl's per-band JSON spool once per UTC day into
+# <BAND>.json.<YYYYMMDD>.gz and keeps this many days per band.
+spool_keep_days = 3
 # dumphfdl reads + updates this systable as it learns ground-station IDs
 # from squitters. Per-instance writable state.
 systable  = "/var/lib/hfdl-recorder/systable.conf"

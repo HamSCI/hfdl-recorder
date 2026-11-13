@@ -82,6 +82,8 @@ DEFAULTS: dict[str, Any] = {
         "dumphfdl":  "/opt/git/sigmond/hfdl-recorder/bin/dumphfdl",
         "spool_dir": "/var/lib/hfdl-recorder",
         "log_dir":   "/var/log/hfdl-recorder",
+        # Rotated per-band JSON spool files kept (one per UTC day).
+        "spool_keep_days": 3,
         "systable":  "/var/lib/hfdl-recorder/systable.conf",
     },
     "sinks": {

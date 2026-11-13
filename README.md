@@ -212,9 +212,12 @@ five bands (2026-11-03, 10-minute blocks, keeper on, off, on), it added about
 0.017 cores to the recorder's 0.28.
 
 dumphfdl's own JSON spool, `/var/lib/hfdl-recorder/<radiod_id>/<BAND>.json`,
-holds every decoded frame and nothing rotates it: about 15 MB a day per station
-at ND.  It stays that way, deliberately, until the timing study decides what to
-keep.
+holds every decoded frame: about 15 MB a day per station at ND.  The daemon
+rotates it once per UTC day.  It copies the finished day into
+`<BAND>.json.<YYYYMMDD>.gz`, then empties the live file in place (dumphfdl keeps
+it open for append, so the daemon never renames it).  `[paths] spool_keep_days`
+(default 3) sets how many rotated files stay per band; older ones are deleted.
+A rotation error logs a warning and never stops decoding.
 
 A batch analyser times the saved windows.  It writes one row per window to
 the local `hfdl.squitter_timing` table in sigmond's sink, and it converts

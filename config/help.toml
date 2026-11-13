@@ -61,6 +61,14 @@ hidden = true
 [paths.spool_dir]
 hidden = true
 
+[paths.spool_keep_days]
+title          = "Days of rotated JSON spool to keep"
+help           = """Once per UTC day the daemon compresses each band's
+dumphfdl JSON spool into <BAND>.json.<YYYYMMDD>.gz under
+/var/lib/hfdl-recorder/<radiod_id>/ and empties the live file.  This many
+newest rotated files per band stay; older ones are deleted.  Default 3.
+"""
+
 [paths.log_dir]
 hidden = true
 

@@ -22,6 +22,7 @@ from hfdl_recorder.config import (
 )
 from hfdl_recorder.core.band_pipeline import BandPipeline
 from hfdl_recorder.core.ch_tailer import ChTailer
+from hfdl_recorder.core.spool_rotation import DEFAULT_KEEP_DAYS, SpoolRotator
 from hfdl_recorder.core.radiod import (
     HFDL_ENCODING,
     HFDL_PRESET,
@@ -86,6 +87,7 @@ class HfdlRecorder:
             self._provision()
             self._start()
             self._start_lifetime_keepalive()
+            self._start_spool_rotation()
             self._notify_ready()
             self._main_loop()
         except Exception:
@@ -401,6 +403,45 @@ class HfdlRecorder:
                     "ch_tailer band=%s startup failed; dumphfdl outputs unaffected",
                     band_name,
                 )
+
+    # -- spool rotation --
+
+    def _build_spool_rotator(self) -> SpoolRotator:
+        from pathlib import Path as _Path
+        paths = self._config.get("paths", {})
+        spool_dir = _Path(paths.get("spool_dir", "/var/lib/hfdl-recorder"))
+        try:
+            keep = int(paths.get("spool_keep_days", DEFAULT_KEEP_DAYS))
+        except (TypeError, ValueError):
+            keep = DEFAULT_KEEP_DAYS
+        return SpoolRotator(spool_dir / self._radiod_id,
+                            [p.name for p in self._pipelines],
+                            keep_days=keep)
+
+    def _start_spool_rotation(self) -> None:
+        """Rotate dumphfdl's per-band JSON spool once per UTC day.
+
+        Runs at startup (a file left from an earlier day rotates now),
+        then re-checks every 10 minutes.  Never fatal.
+        """
+        try:
+            rotator = self._build_spool_rotator()
+        except Exception:
+            logger.exception("spool rotation not started; dumphfdl unaffected")
+            return
+        threading.Thread(target=self._spool_rotation_loop, args=(rotator,),
+                         daemon=True, name="spool-rotation").start()
+
+    def _spool_rotation_loop(self, rotator: SpoolRotator) -> None:
+        while self._running:
+            try:
+                rotator.rotate_once()
+            except Exception:
+                logger.exception("spool rotation error; continuing")
+            for _ in range(600):
+                if not self._running:
+                    return
+                time.sleep(1.0)
 
     # -- LIFETIME keep-alive --
 
