@@ -139,3 +139,36 @@ def test_two_frequencies_make_two_captures():
 
 def test_error_rows_without_nominal_count_nowhere():
     assert captures_for([{"found": False, "freq_khz": 11387, "analyzer_version": 2}], "X") == []
+
+
+# --- label tier (2026-11-14): a label-timed arrival names the ruler that labelled it
+
+def test_label_arrival_carries_its_tier_and_sigma():
+    row = dict(T6ROW, delay_counter_s=None, label_origin="t4", label_sigma_ns=12_000_000)
+    a = arrival_for(row, "X")
+    assert a["engineering"]["delay_basis"] == "label"
+    assert (a["origin"], a["u_epoch_ns"], a["k"], a["p"]) == ("t4", 12_000_000.0, 1.0, None)
+    assert (a["a_level_provenance"], a["counter_epoch_id"]) == ("attested", "")
+
+
+def test_label_arrival_without_sigma_names_its_origin_only():
+    for origin in ("host", "unknown"):
+        a = arrival_for(dict(T6ROW, delay_counter_s=None, label_origin=origin,
+                             label_sigma_ns=None), "X")
+        assert (a["origin"], a["u_epoch_ns"], a["k"], a["a_level_provenance"]) == (
+            origin, None, None, "")
+
+
+def test_counter_arrival_ignores_the_label_tier():
+    a = arrival_for(dict(T6ROW, label_origin="t6_anchor", label_sigma_ns=None), "X")
+    assert (a["origin"], a["u_epoch_ns"]) == ("t6_anchor", 230.0)
+
+
+def test_capture_counts_label_origins():
+    rows = [dict(T6ROW, delay_counter_s=None, label_origin="t4", label_sigma_ns=1),
+            dict(T6ROW, delay_counter_s=None, label_origin="t4", label_sigma_ns=1),
+            dict(T6ROW, label_origin="t6_anchor", label_sigma_ns=None)]
+    (c,) = captures_for(rows, "X")
+    assert c["engineering"]["n_origin:t4"] == "2"
+    assert c["engineering"]["n_origin:t6_anchor"] == "1"
+    assert c["origin"] == "t6_anchor"     # the capture block stays T6's

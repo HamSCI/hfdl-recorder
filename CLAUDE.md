@@ -221,6 +221,15 @@ Sections implemented:
   each with a `.done` marker once analysed (it holds the analyser version)
 - Squitter timing rows: `hfdl.squitter_timing` in `/var/lib/sigmond/sink.db`
   (local rows, never uploaded; no automatic trim)
+- Squitter labels read, never written: hf-timestd's T3 shadow minute rows
+  (`/var/lib/timestd/t3_shadow`, the T6 anchor) and its authority history
+  (`/var/lib/timestd/authority_history.db`, `mode=ro`).  Each row names the
+  ruler that labelled it in `label_origin` (`t6_anchor`, `t1`..`t6`, `host`,
+  `unknown`) and, on its sigmondb arrival, in `origin` with the tier's
+  published sigma in `u_epoch_ns` (Michael 2026-11-14: report squitters with
+  the timing authority the station has at the time).  Only a station whose
+  authority held T6 waits for its anchor, and only `T6_ANCHOR_WAIT_S`.
+  Details: the `timing/batch.py` docstring.
 - label-check result: `/var/lib/hfdl-recorder/label_check_results.toml` (nothing reads it)
 - Process log: systemd journal (`StandardOutput=journal`) —
   `journalctl -u hfdl-recorder@<radiod_id>` or `smd log hfdl-recorder`

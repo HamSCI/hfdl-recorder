@@ -185,6 +185,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub_sq.add_argument("--registration-dir", type=Path,
                         default=Path("/var/lib/timestd/t3_shadow"),
                         help="hf-timestd T3 shadow minute rows (read only)")
+    sub_sq.add_argument("--authority-db", type=Path,
+                        default=Path("/var/lib/timestd/authority_history.db"),
+                        help="hf-timestd authority history (read only): names "
+                             "the tier and sigma that labelled a row without "
+                             "a T6 anchor; missing or unreadable gives "
+                             "\"unknown\"")
     sub_sq.add_argument("--max", type=int, default=2000, dest="max_windows",
                         help="analyse at most this many windows per run")
     _add_common(sub_sq)
@@ -299,7 +305,8 @@ def _handle_squitter_analyze(args, parser) -> int:
         _squitter_dir(args), registration_dir=args.registration_dir,
         since=_parse_since(args.since), radiod_id=args.radiod_id,
         max_windows=args.max_windows, csv_path=args.csv, jsonl_path=args.jsonl,
-        sink=not args.no_sink, reporter_id=_squitter_reporter_id(args))
+        sink=not args.no_sink, reporter_id=_squitter_reporter_id(args),
+        authority_db=args.authority_db)
     return 1 if counts.get("stopped") else 0
 
 

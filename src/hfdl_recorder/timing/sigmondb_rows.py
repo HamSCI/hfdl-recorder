@@ -10,8 +10,14 @@ Three choices differ from the back-fill on purpose:
 - One capture per batch run and (frequency, analyzer version), not per UTC hour.  Its time is
   the run's earliest nominal frame time; its duration runs to the last frame's end.  The host
   clock never enters a timing field.
-- A label-timed arrival (no delay_counter_s) travels with the null provenance block and
-  engineering delay_basis "label".
+- A label-timed arrival (no delay_counter_s) has engineering delay_basis "label".  Since
+  2026-11-14 (Michael: "a station can report squitters as it hears them, reporting the timing
+  authority it has at the time") it names the ruler that labelled it: origin is the row's
+  label_origin ("t5", "t4", "t3", "t2", "t1", "t6" for a T6 authority whose counter anchor
+  never came, "host" when no authority offset entered the label, "unknown" when the
+  authority history could not say), u_epoch_ns the sigma hf-timestd published for that tier
+  (k 1, a_level_provenance "attested"), or null with no sigma.  A row without label_origin (one
+  written before then, or the back-fill's) keeps the null block.
 - A T6 counter arrival carries the assumed block: u_epoch_ns 230.0, k 2.0, provenance
   "assumed", origin "t6_anchor".
 
@@ -62,6 +68,19 @@ def _assumed_provenance(counter_epoch_id: str) -> dict:
                 counter_epoch_id=counter_epoch_id or "", origin=ORIGIN)
 
 
+def _label_provenance(row: dict) -> dict:
+    """The block for a label-timed row: the tier that labelled it, with that tier's
+    published sigma.  The null block for a row that names no label origin."""
+    origin = row.get("label_origin")
+    if not origin:
+        return _null_provenance()
+    sigma = row.get("label_sigma_ns")
+    has = sigma is not None
+    return dict(u_epoch_ns=float(sigma) if has else None, k=1.0 if has else None, p=None,
+                a_level="", a_level_provenance="attested" if has else "",
+                counter_epoch_id="", origin=str(origin))
+
+
 def _counter_map(v) -> Optional[dict]:
     if isinstance(v, dict):
         return v
@@ -105,7 +124,7 @@ def arrival_for(row: dict, reporter_id: str) -> Optional[dict]:
     delay = row["delay_counter_s"] if counter else row.get("delay_s")
     if delay is None:
         return None
-    prov = _provenance(row) if counter else _null_provenance()
+    prov = _provenance(row) if counter else _label_provenance(row)
     eng = {k: _eng(row.get(k), k) for k in _ENG_KEYS}
     eng["delay_basis"] = "counter" if counter else "label"
     doppler = row.get("doppler_hz")
@@ -151,6 +170,8 @@ def captures_for(rows: list, reporter_id: str) -> list:
                 counts[1] += 1
                 n_found += 1
         eng = {"source": "squitter-batch", "n_rows": str(len(rs)), "n_anchored": str(n_anchored)}
+        for o in sorted({r.get("label_origin") for r in rs} - {None, ""}):
+            eng[f"n_origin:{o}"] = str(sum(r.get("label_origin") == o for r in rs))
         for tx, (n, f) in per_gs.items():
             eng[f"n_rows:{tx}"] = str(n)
             eng[f"n_found:{tx}"] = str(f)

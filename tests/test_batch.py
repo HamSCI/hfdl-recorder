@@ -107,6 +107,7 @@ def _registration(regdir, idx0, *, ahead_s=-60.0, epoch_gps=EPOCH_GPS,
 
 def _run(tmp_path, fac=None, **kw):
     fac = fac or Factory()
+    kw.setdefault("authority_db", tmp_path / "authority_history.db")
     counts = batch.run_batch(tmp_path / "win", registration_dir=tmp_path / "reg",
                              writer_factory=fac, **kw)
     return fac, counts
@@ -450,8 +451,10 @@ def test_arrival_input_index_from_in_window_offset(tmp_path):
 
 def test_window_waits_for_its_registration(tmp_path):
     """hf-timestd writes the minute row after the window: a window analysed
-    first must stay unmarked and retry, but not forever."""
+    first, while the authority held T6, must stay unmarked and retry, but
+    not forever."""
     _, idx0 = _window(tmp_path / "win", 0.0123)
+    _history(tmp_path, [(NOMINAL - 60, "T6", 150)])
     _registration(tmp_path / "reg", idx0, ahead_s=-300.0)    # newest row: too old
     fac, counts = _run(tmp_path, now=NOMINAL + 60)
     assert fac.writer.inserts == [] and _dones(tmp_path) == []
@@ -462,9 +465,10 @@ def test_window_waits_for_its_registration(tmp_path):
     assert len(_dones(tmp_path)) == 1
 
 
-def test_registration_absent_for_hours_gives_up(tmp_path):
+def test_registration_absent_past_the_wait_gives_up(tmp_path):
     _window(tmp_path / "win", 0.0123)
-    fac, counts = _run(tmp_path, now=NOMINAL + batch.REG_WAIT_S + 1)
+    _history(tmp_path, [(NOMINAL - 60, "T6", 150)])
+    fac, counts = _run(tmp_path, now=NOMINAL + batch.T6_ANCHOR_WAIT_S + 1)
     assert fac.writer.inserts[0]["delay_counter_s"] is None
     assert len(_dones(tmp_path)) == 1
 
@@ -732,3 +736,248 @@ def test_all_refused_errors_only_from_two_found(tmp_path, monkeypatch, caplog, n
     lines = [r for r in caplog.records if "no arrival" in r.getMessage()]
     assert len(lines) == 1
     assert lines[0].levelname == ("ERROR" if stops else "WARNING")
+
+
+# ------------------------------------- label tier: the ruler that labelled a row
+
+def _iso(t):
+    return datetime.fromtimestamp(t, timezone.utc).isoformat(
+        timespec="microseconds").replace("+00:00", "Z")
+
+
+def _history(tmp_path, rows, *, path=None):
+    """authority_history.db as hf-timestd writes it: rows of
+    (utc_published seconds, t_level_active, sigma_ns)."""
+    import sqlite3
+    path = path or tmp_path / "authority_history.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE IF NOT EXISTS authority_snapshot ("
+                "utc_published TEXT NOT NULL PRIMARY KEY, a_level TEXT, "
+                "t_level_active TEXT, rtp_to_utc_offset_ns INTEGER, sigma_ns INTEGER)")
+    con.executemany("INSERT INTO authority_snapshot (utc_published, t_level_active, "
+                    "sigma_ns) VALUES (?, ?, ?)",
+                    [(_iso(t), tier, sig) for t, tier, sig in rows])
+    con.commit()
+    con.close()
+    return path
+
+
+def _set_meta(p, **kw):
+    with np.load(p) as z:
+        x, meta = z["x"], json.loads(str(z["meta"]))
+    meta.update(kw)
+    np.savez(p, x=x, meta=np.str_(json.dumps(meta)))
+
+
+def test_t6_anchor_row_keeps_its_t6_block(tmp_path):
+    fac = Factory()
+    p, idx0 = _window(tmp_path / "win", 0.012)
+    _as_t6(p)
+    _registration(tmp_path / "reg", idx0)
+    _history(tmp_path, [(NOMINAL - 60, "T6", 150)])
+    _run(tmp_path, fac)
+    (r,) = fac.writer.inserts
+    assert r["label_origin"] == "t6_anchor" and r["label_sigma_ns"] is None
+    (a,) = fac.writers["arrival"].inserts
+    assert (a["origin"], a["u_epoch_ns"], a["k"]) == ("t6_anchor", 230.0, 2.0)
+
+
+def test_t4_station_labels_now_with_t4_tier_and_sigma(tmp_path):
+    """No T6 path: the window is labelled on the run that first sees it."""
+    fac = Factory()
+    _window(tmp_path / "win", 0.012)
+    _history(tmp_path, [(NOMINAL - 90, "T4", 10_000_000),
+                        (NOMINAL - 60, "T4", 12_000_000)])
+    _, counts = _run(tmp_path, fac, now=NOMINAL + 60)
+    assert counts["awaiting_registration"] == 0 and counts["analysed"] == 1
+    (r,) = fac.writer.inserts
+    assert r["delay_counter_s"] is None
+    assert (r["label_origin"], r["label_sigma_ns"]) == ("t4", 12_000_000)
+    assert r["label_tier_utc"] == _iso(NOMINAL - 60)
+    (a,) = fac.writers["arrival"].inserts
+    assert a["engineering"]["delay_basis"] == "label"
+    assert (a["origin"], a["u_epoch_ns"], a["k"]) == ("t4", 12_000_000.0, 1.0)
+    assert a["a_level_provenance"] == "attested" and a["counter_epoch_id"] == ""
+    assert len(_dones(tmp_path)) == 1
+    assert counts["label_origins"] == {"t4": 1}
+
+
+def test_t6_active_but_anchor_late_waits_then_takes_the_anchor(tmp_path):
+    p, idx0 = _window(tmp_path / "win", 0.012)
+    _as_t6(p)
+    _history(tmp_path, [(NOMINAL - 30, "T6", 150)])
+    fac, counts = _run(tmp_path, now=NOMINAL + 60)
+    assert counts["awaiting_registration"] == 1 and fac.writer.inserts == []
+    assert _dones(tmp_path) == []
+    _registration(tmp_path / "reg", idx0, ahead_s=+30.0)
+    fac, counts = _run(tmp_path, now=NOMINAL + 120)
+    (r,) = fac.writer.inserts
+    assert r["delay_counter_s"] is not None and r["label_origin"] == "t6_anchor"
+    assert fac.writers["arrival"].inserts[0]["origin"] == "t6_anchor"
+
+
+def test_t6_active_anchor_never_comes_labels_t6_after_the_short_wait(tmp_path):
+    _window(tmp_path / "win", 0.012)
+    _history(tmp_path, [(NOMINAL - 30, "T6", 150)])
+    fac, counts = _run(tmp_path, now=NOMINAL + batch.T6_ANCHOR_WAIT_S + 1)
+    assert counts["awaiting_registration"] == 0
+    (r,) = fac.writer.inserts
+    assert (r["label_origin"], r["label_sigma_ns"]) == ("t6", 150)
+    assert fac.writers["arrival"].inserts[0]["origin"] == "t6"
+
+
+def test_t6_wait_stays_short(tmp_path):
+    assert batch.T6_ANCHOR_WAIT_S <= 900.0
+
+
+def test_no_authority_offset_in_the_label_is_host(tmp_path):
+    """The keeper applied no authority offset (offset_ns None): radiod's
+    status pair alone labelled the window, whatever tier the authority held."""
+    fac = Factory()
+    p, _ = _window(tmp_path / "win", 0.012)
+    _set_meta(p, offset_ns=None, anchor_source="rtp_to_utc")
+    _history(tmp_path, [(NOMINAL - 60, "T4", 10_000_000)])
+    _run(tmp_path, fac, now=NOMINAL + 60)
+    (r,) = fac.writer.inserts
+    assert (r["label_origin"], r["label_sigma_ns"]) == ("host", None)
+    a = fac.writers["arrival"].inserts[0]
+    assert (a["origin"], a["u_epoch_ns"], a["k"]) == ("host", None, None)
+
+
+def _assert_unknown(fac, counts):
+    assert counts["analysed"] == 1 and not counts["stopped"]
+    (r,) = fac.writer.inserts
+    assert (r["label_origin"], r["label_sigma_ns"]) == ("unknown", None)
+    (a,) = fac.writers["arrival"].inserts
+    assert (a["origin"], a["u_epoch_ns"]) == ("unknown", None)
+
+
+def test_history_missing_gives_unknown_and_no_wait(tmp_path):
+    fac = Factory()
+    _window(tmp_path / "win", 0.012)
+    _, counts = _run(tmp_path, fac, now=NOMINAL + 60)
+    _assert_unknown(fac, counts)
+
+
+def test_history_malformed_file_gives_unknown(tmp_path):
+    fac = Factory()
+    _window(tmp_path / "win", 0.012)
+    (tmp_path / "authority_history.db").write_bytes(b"not a database at all" * 100)
+    _, counts = _run(tmp_path, fac, now=NOMINAL + 60)
+    _assert_unknown(fac, counts)
+
+
+def test_history_without_the_table_gives_unknown(tmp_path):
+    import sqlite3
+    fac = Factory()
+    _window(tmp_path / "win", 0.012)
+    sqlite3.connect(tmp_path / "authority_history.db").execute(
+        "CREATE TABLE other (x)").connection.commit()
+    _, counts = _run(tmp_path, fac, now=NOMINAL + 60)
+    _assert_unknown(fac, counts)
+
+
+def test_history_malformed_row_gives_unknown(tmp_path):
+    fac = Factory()
+    _window(tmp_path / "win", 0.012)
+    _history(tmp_path, [(NOMINAL - 60, "T4", "lots")])
+    db = tmp_path / "authority_history.db"
+    import sqlite3
+    con = sqlite3.connect(db)
+    con.execute("UPDATE authority_snapshot SET t_level_active = 'banana'")
+    con.commit()
+    con.close()
+    _, counts = _run(tmp_path, fac, now=NOMINAL + 60)
+    _assert_unknown(fac, counts)
+
+
+def test_history_locked_gives_unknown_without_blocking(tmp_path, monkeypatch):
+    import sqlite3
+    import time as _time
+    monkeypatch.setattr(batch, "AUTHORITY_DB_TIMEOUT_S", 0.05)
+    fac = Factory()
+    _window(tmp_path / "win", 0.012)
+    db = _history(tmp_path, [(NOMINAL - 60, "T4", 10_000_000)])
+    holder = sqlite3.connect(db, isolation_level=None)
+    holder.execute("BEGIN EXCLUSIVE")       # rollback journal: blocks readers
+    try:
+        t = _time.monotonic()
+        _, counts = _run(tmp_path, fac, now=NOMINAL + 60)
+        assert _time.monotonic() - t < 30
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    _assert_unknown(fac, counts)
+
+
+def test_history_too_old_gives_unknown(tmp_path):
+    fac = Factory()
+    _window(tmp_path / "win", 0.012)
+    _history(tmp_path, [(NOMINAL - batch.HISTORY_MAX_AGE_S - 60, "T4", 10_000_000)])
+    _, counts = _run(tmp_path, fac, now=NOMINAL + 60)
+    _assert_unknown(fac, counts)
+
+
+def test_tier_change_mid_window_takes_the_row_in_force_at_the_anchor(tmp_path):
+    """The window keeper took the label's offset at its anchor instant
+    (t0_utc - anchor_age_s): the history row in force then (latest
+    utc_published at or before it) names the ruler.  A change later, even
+    inside the window, does not."""
+    fac = Factory()
+    p, _ = _window(tmp_path / "win", 0.012)
+    t0 = NOMINAL - 0.03
+    _set_meta(p, anchor_age_s=20.0)
+    anchor = t0 - 20.0
+    _history(tmp_path, [(anchor - 25, "T3", 2_000_000),
+                        (anchor, "T4", 10_000_000),       # in force at the anchor
+                        (t0 - 5.0, "T5", 1_000_000),      # changes before the window
+                        (t0 + 1.0, "T3", 3_000_000)])     # and again inside it
+    _run(tmp_path, fac, now=NOMINAL + 60)
+    (r,) = fac.writer.inserts
+    assert (r["label_origin"], r["label_sigma_ns"]) == ("t4", 10_000_000)
+
+
+def test_history_read_through_hf_timestds_own_store(tmp_path):
+    """The schema hf-timestd writes (hamsci_dsp's AuthoritySnapshotStore, WAL)."""
+    store_mod = pytest.importorskip("hamsci_dsp.io.authority_snapshot_store")
+    fac = Factory()
+    _window(tmp_path / "win", 0.012)
+    with store_mod.AuthoritySnapshotStore(tmp_path / "authority_history.db") as st:
+        st.insert({"utc_published": _iso(NOMINAL - 45), "schema_version": 1,
+                   "t_level_active": "T3", "sigma_ns": 4_000_000})
+        _run(tmp_path, fac, now=NOMINAL + 60)    # writer still open: WAL
+    (r,) = fac.writer.inserts
+    assert (r["label_origin"], r["label_sigma_ns"]) == ("t3", 4_000_000)
+
+
+def test_capture_counts_rows_per_label_origin(tmp_path):
+    fac = Factory()
+    _window(tmp_path / "win", 0.012, frame=0)
+    p, _ = _window(tmp_path / "win", 0.012, frame=1)
+    _set_meta(p, offset_ns=None)
+    _history(tmp_path, [(NOMINAL - 60, "T4", 10_000_000)])
+    _run(tmp_path, fac, now=NOMINAL + 60)
+    (c,) = fac.writers["capture"].inserts
+    assert c["engineering"]["n_origin:t4"] == "1"
+    assert c["engineering"]["n_origin:host"] == "1"
+
+
+@pytest.mark.parametrize("extra,expect", [
+    ([], batch.DEFAULT_AUTHORITY_DB),
+    (["--authority-db", "/x/history.db"], "/x/history.db"),
+])
+def test_cli_passes_the_authority_db(tmp_path, monkeypatch, extra, expect):
+    import sys
+    from hfdl_recorder import cli
+    from hfdl_recorder.timing import batch as b
+    seen = {}
+
+    def fake(window_dir, **kw):
+        seen.update(kw)
+        return {"stopped": False}
+    monkeypatch.setattr(b, "run_batch", fake)
+    monkeypatch.setattr(sys, "argv", ["hfdl-recorder", "squitter-analyze",
+                                      "--dir", str(tmp_path)] + extra)
+    with pytest.raises(SystemExit):
+        cli.main()
+    assert str(seen["authority_db"]) == expect
