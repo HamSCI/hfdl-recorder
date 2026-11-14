@@ -12,7 +12,7 @@
 #   5. Renders config template (non-destructive — never overwrites)
 #   6. Installs systemd unit template
 #   7. Disables the ka9q-radio hfdl.service if running (we replace it)
-#   8. Enables hfdl-recorder@<radiod_id> instances from config
+#   8. Enables hfdl-recorder@<status> instances from config (retires @default)
 #
 # Idempotent: safe to re-run.
 
@@ -221,17 +221,24 @@ if systemctl is-active --quiet hfdl.service 2>/dev/null; then
 fi
 
 # --- Phase 8: enable instances ---
-ui_info "Parsing radiod IDs from $CONFIG_FILE"
+ui_info "Parsing radiod status names from $CONFIG_FILE"
+# Instance name = each [[radiod]] block's `status` (mDNS status name);
+# placeholders and empty values are skipped.  Never invent "default":
+# a stray @default runs the same config against the same radiod and
+# opens every channel twice.
 RADIOD_IDS=$("$VENV_DIR/bin/python3" -c "
-import tomllib
-with open('$CONFIG_FILE', 'rb') as f:
-    cfg = tomllib.load(f)
-blocks = cfg.get('radiod', [])
-if isinstance(blocks, dict):
-    blocks = [blocks]
-for b in blocks:
-    print(b.get('id', 'default'))
-" 2>/dev/null)
+import sys
+from hfdl_recorder.config import radiod_instance_names_from_file
+print('\\n'.join(radiod_instance_names_from_file(sys.argv[1])))
+" "$CONFIG_FILE" 2>/dev/null)
+
+# Retire a stray hfdl-recorder@default left by older installers.
+if [[ " $(echo $RADIOD_IDS) " != *" default "* ]] && \
+   { systemctl is-enabled --quiet hfdl-recorder@default.service 2>/dev/null || \
+     systemctl is-active --quiet hfdl-recorder@default.service 2>/dev/null; }; then
+    ui_warn "Disabling stray hfdl-recorder@default.service (not a configured radiod)"
+    systemctl disable --now hfdl-recorder@default.service
+fi
 
 if [[ -z "$RADIOD_IDS" ]]; then
     ui_warn "No radiod IDs found in config — no instances enabled"

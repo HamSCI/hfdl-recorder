@@ -333,3 +333,31 @@ def resolve_radiod_status(radiod_block: dict) -> str:
             "uses the legacy `radiod_status` field."
         )
     return status
+
+
+def radiod_instance_names(config: dict) -> list[str]:
+    """Names of the hfdl-recorder@<name> instances a config calls for.
+
+    One name per [[radiod]] block: its ``status`` (the radiod's mDNS
+    status name).  A legacy ``id`` counts only when ``status`` is
+    absent.  Empty values and placeholders (``<...>``) are skipped.
+    The result never contains a made-up fallback such as "default".
+    """
+    blocks = config.get("radiod", [])
+    if isinstance(blocks, dict):
+        blocks = [blocks]
+    names: list[str] = []
+    for block in blocks:
+        raw = block.get("status") if "status" in block else block.get("id")
+        name = str(raw or "").strip()
+        if not name or name.startswith("<") or name in names:
+            continue
+        names.append(name)
+    return names
+
+
+def radiod_instance_names_from_file(path: str | Path) -> list[str]:
+    """Same as radiod_instance_names, reading a TOML file (install.sh)."""
+    import tomllib
+    with open(path, "rb") as f:
+        return radiod_instance_names(tomllib.load(f))
