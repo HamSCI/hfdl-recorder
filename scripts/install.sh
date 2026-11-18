@@ -187,7 +187,17 @@ fi
 
 # --- Phase 4: config ---
 mkdir -p "$CONFIG_DIR"
-if [[ ! -f "$CONFIG_FILE" ]]; then
+# A station migrated to per-receiver instances keeps one
+# $CONFIG_DIR/<reporter-key>.toml each and no shared config; rendering the
+# template again would bring back a shared config nobody configured.
+# -I: this runs as root; keep the cwd off sys.path.
+PER_INSTANCE=$("$VENV_DIR/bin/python3" -I -c "
+from hfdl_recorder.config import per_instance_names_from_dir
+print(' '.join(per_instance_names_from_dir()))
+" 2>/dev/null || true)
+if [[ ! -f "$CONFIG_FILE" && -n "$PER_INSTANCE" ]]; then
+    ui_info "Per-receiver configs in $CONFIG_DIR ($PER_INSTANCE); no shared config rendered"
+elif [[ ! -f "$CONFIG_FILE" ]]; then
     ui_info "Rendering config template -> $CONFIG_FILE"
     cp "$REPO_SOURCE/config/hfdl-recorder-config.toml.template" "$CONFIG_FILE"
     ui_warn "Edit $CONFIG_FILE with your station_id and radiod settings"
@@ -226,11 +236,19 @@ ui_info "Parsing radiod status names from $CONFIG_FILE"
 # placeholders and empty values are skipped.  Never invent "default":
 # a stray @default runs the same config against the same radiod and
 # opens every channel twice.
-RADIOD_IDS=$("$VENV_DIR/bin/python3" -c "
+# On a station with per-receiver configs, the instances are their reporter
+# keys (hfdl-recorder@AC0G-B1A) and nothing else: enabling the shared
+# config's radiod-keyed instances too would open every channel twice.
+# -I: this runs as root; keep the cwd off sys.path.
+RADIOD_IDS=$("$VENV_DIR/bin/python3" -I -c "
 import sys
 from hfdl_recorder.config import radiod_instance_names_from_file
 print('\\n'.join(radiod_instance_names_from_file(sys.argv[1])))
 " "$CONFIG_FILE" 2>/dev/null)
+if [[ -n "$PER_INSTANCE" ]]; then
+    [[ -f "$CONFIG_FILE" ]] && ui_warn "$CONFIG_FILE still exists beside per-receiver configs; its radiod-keyed instances are not enabled"
+    RADIOD_IDS="$PER_INSTANCE"
+fi
 
 # Retire a stray hfdl-recorder@default left by older installers.
 if [[ " $(echo $RADIOD_IDS) " != *" default "* ]] && \
@@ -251,4 +269,5 @@ else
 fi
 
 ui_info "Install complete. Edit $CONFIG_FILE then start instances with:"
-ui_info "  sudo systemctl start hfdl-recorder@<radiod-id>"
+ui_info "  sudo systemctl start hfdl-recorder@<reporter-key>   (per-receiver config)"
+ui_info "  sudo systemctl start hfdl-recorder@<radiod-status>   (legacy shared config)"

@@ -10,8 +10,10 @@ from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Any
 
+from hfdl_recorder._reporter_id import to_key
 from hfdl_recorder.bands import HFDL_BANDS
 from hfdl_recorder.config import (
+    extract_reporter_id,
     get_enabled_band_names,
     get_enabled_bands,
     resolve_radiod_status,
@@ -41,6 +43,16 @@ def build_inventory(config: dict, config_path: Path) -> dict:
 
     instances = []
     all_log_paths: dict[str, Any] = {}
+    # A per-receiver config names its reporter, and its unit is
+    # hfdl-recorder@<reporter key>; a legacy shared config runs one
+    # hfdl-recorder@<radiod status> per block.
+    reporter_id = extract_reporter_id(config)
+    unit_key = None
+    if reporter_id:
+        try:
+            unit_key = to_key(reporter_id)
+        except ValueError:
+            unit_key = None
 
     for block in radiod_blocks:
         # Phase 6 cutover (RADIOD-IDENTIFICATION.md §3.1): the mDNS
@@ -89,7 +101,8 @@ def build_inventory(config: dict, config_path: Path) -> dict:
         # identifier).
         inventory_radiod_id = status_dns
         instance = {
-            "instance": radiod_id,
+            "instance": unit_key or radiod_id,
+            "reporter_id": reporter_id,
             "radiod_id": inventory_radiod_id,
             "host": "localhost",
             "radiod_status_dns": status_dns,

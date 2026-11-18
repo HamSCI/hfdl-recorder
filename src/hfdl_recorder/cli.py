@@ -66,13 +66,22 @@ def build_parser() -> argparse.ArgumentParser:
             help="Override log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
         )
 
+    def _add_instance(sub):
+        sub.add_argument(
+            "--instance", default=None,
+            help="receiver instance keyed by reporter (AC0G-B1A): reads "
+                 "/etc/hfdl-recorder/<instance>.toml",
+        )
+
     sub_inv = subparsers.add_parser("inventory", help="Contract v0.4 inventory")
     sub_inv.add_argument("--json", action="store_true", default=True)
     _add_common(sub_inv)
+    _add_instance(sub_inv)
 
     sub_val = subparsers.add_parser("validate", help="Contract v0.4 validation")
     sub_val.add_argument("--json", action="store_true", default=True)
     _add_common(sub_val)
+    _add_instance(sub_val)
 
     sub_ver = subparsers.add_parser("version", help="Version info")
     sub_ver.add_argument("--json", action="store_true", default=True)
@@ -107,6 +116,17 @@ def build_parser() -> argparse.ArgumentParser:
                           help="overwrite existing config")
     sub_init.add_argument("--non-interactive", action="store_true",
                           help="use env-var defaults, do not prompt")
+    sub_init.add_argument("--instance", default=None,
+                          help="receiver instance keyed by reporter (AC0G-B1A); "
+                               "writes /etc/hfdl-recorder/<instance>.toml with "
+                               "[instance] reporter_id and only that "
+                               "receiver's radiod (default: $SIGMOND_INSTANCE)")
+    sub_init.add_argument("--reporter-id", default=None,
+                          help="the receiver's reporter id (AC0G/B1A); default "
+                               "$STATION_REPORTER_ID when its key is the instance")
+    sub_init.add_argument("--radiod-status", default=None,
+                          help="the receiver's radiod status name; default "
+                               "$SIGMOND_RADIOD_STATUS")
     _add_common(sub_init)
 
     sub_edit = cfg_sub.add_parser(
@@ -116,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub_edit.add_argument("--radiod-id", default=None,
                           help="focus edits on a specific [[radiod]] block")
     _add_common(sub_edit)
+    _add_instance(sub_edit)
 
     # CLIENT-CONTRACT §14 JSON-roundtrip surface.  Sigmond's in-TUI
     # Textual config wizard requires `show --json` + `apply --json -`;
@@ -126,6 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub_show.add_argument("--defaults", action="store_true",
                           help="merge DEFAULTS into the output")
     _add_common(sub_show)
+    _add_instance(sub_show)
 
     sub_apply = cfg_sub.add_parser(
         "apply", help="apply a JSON payload (from stdin) to the config")
@@ -133,6 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub_apply.add_argument("input", nargs="?", default="-",
                            help="JSON payload path or `-` for stdin (default)")
     _add_common(sub_apply)
+    _add_instance(sub_apply)
 
     sub_lc = subparsers.add_parser(
         "label-check",
@@ -277,7 +300,8 @@ def _squitter_dir(args) -> Path:
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        path = resolve_config_path(instance=args.instance, explicit_path=args.config)
+        path = resolve_config_path(instance=_unescape(args.instance),
+                                   explicit_path=args.config)
     try:
         return Path(load_config(path)["timing_squitters"]["window_dir"])
     except FileNotFoundError:
@@ -293,7 +317,8 @@ def _squitter_reporter_id(args) -> Optional[str]:
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        path = resolve_config_path(instance=args.instance, explicit_path=args.config)
+        path = resolve_config_path(instance=_unescape(args.instance),
+                                   explicit_path=args.config)
     return extract_reporter_id(path)
 
 
@@ -303,7 +328,7 @@ def _handle_squitter_analyze(args, parser) -> int:
         parser.error("--no-sink needs --csv or --jsonl")
     counts = batch.run_batch(
         _squitter_dir(args), registration_dir=args.registration_dir,
-        since=_parse_since(args.since), radiod_id=args.radiod_id,
+        since=_parse_since(args.since), radiod_id=_squitter_radiod_id(args),
         max_windows=args.max_windows, csv_path=args.csv, jsonl_path=args.jsonl,
         sink=not args.no_sink, reporter_id=_squitter_reporter_id(args),
         authority_db=args.authority_db)
@@ -326,63 +351,103 @@ def _handle_config(args):
     sys.exit(2)
 
 
+def _resolved_config_path(args) -> Path:
+    """--config, else $HFDL_RECORDER_CONFIG, else the --instance file, else
+    the legacy shared config.  An --instance names that receiver's file
+    only: no fallback to the shared config."""
+    from hfdl_recorder.config import DEFAULT_CONFIG_PATH, per_instance_config_path
+    if getattr(args, "config", None):
+        return args.config
+    env = os.environ.get("HFDL_RECORDER_CONFIG")
+    if env:
+        return Path(env)
+    instance = getattr(args, "instance", None)
+    if instance:
+        return per_instance_config_path(instance)
+    return DEFAULT_CONFIG_PATH
+
+
+def _contract_config_paths(args) -> list:
+    """The configs inventory and validate report on: the one the caller
+    names, or the shared config when it exists; on a station migrated to
+    per-receiver instances (no shared config), every per-instance file."""
+    from hfdl_recorder.config import per_instance_config_paths
+    path = _resolved_config_path(args)
+    named = (getattr(args, "config", None) or getattr(args, "instance", None)
+             or os.environ.get("HFDL_RECORDER_CONFIG"))
+    if named or path.exists():
+        return [path]
+    return per_instance_config_paths() or [path]
+
+
+def _merge_payloads(payloads: list) -> dict:
+    """One payload from one per config.  The first carries the header;
+    instances, issues and log paths add up; config_paths lists them all."""
+    if len(payloads) == 1:
+        return payloads[0]
+    out = dict(payloads[0])
+    out["config_paths"] = [p["config_path"] for p in payloads]
+    for key in ("instances", "issues"):
+        out[key] = [item for p in payloads for item in p.get(key, [])]
+    if any("log_paths" in p for p in payloads):
+        out["log_paths"] = {k: v for p in payloads
+                            for k, v in p.get("log_paths", {}).items()}
+    if any("ok" in p for p in payloads):
+        out["ok"] = all(p.get("ok", True) for p in payloads)
+    return out
+
+
 def _handle_inventory(args):
-    from hfdl_recorder.config import DEFAULT_CONFIG_PATH, load_config
+    from hfdl_recorder.config import load_config
     from hfdl_recorder.contract import build_inventory
 
-    config_path = args.config or Path(
-        os.environ.get("HFDL_RECORDER_CONFIG", str(DEFAULT_CONFIG_PATH))
-    )
-    try:
-        config = load_config(config_path)
-    except FileNotFoundError:
-        payload = {
-            "client": "hfdl-recorder",
-            "version": "0.1.0",
-            "contract_version": "0.8",
-            "config_path": str(config_path),
-            "instances": [],
-            "issues": [
-                {
-                    "severity": "fail",
-                    "instance": "all",
-                    "message": f"config not found: {config_path}",
-                }
-            ],
-        }
-        print(json.dumps(payload, indent=2))
-        return
-
-    payload = build_inventory(config, config_path)
-    print(json.dumps(payload, indent=2))
+    payloads = []
+    for config_path in _contract_config_paths(args):
+        try:
+            config = load_config(config_path)
+        except FileNotFoundError:
+            payloads.append({
+                "client": "hfdl-recorder",
+                "version": "0.1.0",
+                "contract_version": "0.8",
+                "config_path": str(config_path),
+                "instances": [],
+                "issues": [
+                    {
+                        "severity": "fail",
+                        "instance": "all",
+                        "message": f"config not found: {config_path}",
+                    }
+                ],
+            })
+            continue
+        payloads.append(build_inventory(config, config_path))
+    print(json.dumps(_merge_payloads(payloads), indent=2))
 
 
 def _handle_validate(args):
-    from hfdl_recorder.config import DEFAULT_CONFIG_PATH, load_config
+    from hfdl_recorder.config import load_config
     from hfdl_recorder.contract import build_validate
 
-    config_path = args.config or Path(
-        os.environ.get("HFDL_RECORDER_CONFIG", str(DEFAULT_CONFIG_PATH))
-    )
-    try:
-        config = load_config(config_path)
-    except FileNotFoundError:
-        payload = {
-            "ok": False,
-            "config_path": str(config_path),
-            "issues": [
-                {
-                    "severity": "fail",
-                    "instance": "all",
-                    "message": f"config not found: {config_path}",
-                }
-            ],
-        }
-        print(json.dumps(payload, indent=2))
-        sys.exit(1)
-        return
-
-    payload = build_validate(config, config_path)
+    payloads = []
+    for config_path in _contract_config_paths(args):
+        try:
+            config = load_config(config_path)
+        except FileNotFoundError:
+            payloads.append({
+                "ok": False,
+                "config_path": str(config_path),
+                "issues": [
+                    {
+                        "severity": "fail",
+                        "instance": "all",
+                        "message": f"config not found: {config_path}",
+                    }
+                ],
+            })
+            continue
+        payloads.append(build_validate(config, config_path))
+    payload = _merge_payloads(payloads)
     print(json.dumps(payload, indent=2))
     if not payload["ok"]:
         sys.exit(1)
@@ -407,50 +472,112 @@ def _handle_daemon(args):
 
     from hfdl_recorder.config import (
         extract_reporter_id, load_config, resolve_config_path,
-        resolve_radiod_block,
     )
     from hfdl_recorder.core.daemon import HfdlRecorder
 
-    # Phase-5 cutover (sigmond MULTI-INSTANCE-ARCHITECTURE.md §4)
-    instance = getattr(args, "instance", None)
+    # Per-instance config first (sigmond MULTI-INSTANCE-ARCHITECTURE.md §4):
+    # /etc/hfdl-recorder/<instance>.toml when it exists, else the legacy
+    # shared config with a DeprecationWarning.
+    instance = _unescape(getattr(args, "instance", None))
     config_path = resolve_config_path(
         instance=instance, explicit_path=args.config,
     )
     config = load_config(config_path)
-    try:
-        radiod_block = resolve_radiod_block(config, args.radiod_id)
-    except ValueError:
-        # Post-`smd instance migrate` soft-cutover: the systemd
-        # template still passes --radiod-id %i (= reporter ID),
-        # which doesn't match the [[radiod]] block's id (= mDNS
-        # source label) in the per-instance config — and the
-        # /etc/radio/radiod@<reporter-id>.conf synth path doesn't
-        # exist either.  When --instance was given the per-instance
-        # config defines this instance's source unambiguously; fall
-        # through to None (single-block resolution).  Warn so the
-        # mismatch stays visible.  Legacy multi-radiod shared
-        # configs (no --instance) keep strict id matching.
-        if args.radiod_id is None or instance is None:
-            raise
-        logger.warning(
-            "--radiod-id=%r did not resolve in %s (--instance=%r); "
-            "falling through to single-block per-instance path.  "
-            "Drop --radiod-id from the systemd template once all "
-            "reporters are migrated.",
-            args.radiod_id, config_path, instance,
-        )
-        radiod_block = resolve_radiod_block(config, None)
-    reporter_id = extract_reporter_id(config_path)
+    # The receiver's reporter id from the [instance] block; None for a
+    # legacy shared config (its squitter rows keep an empty reporter).
+    reporter_id = extract_reporter_id(config)
+    radiod_block = _instance_block(config, config_path,
+                                   _unescape(args.radiod_id), instance,
+                                   reporter_id)
 
     logger.info(
         "Starting hfdl-recorder daemon for radiod %s "
         "(config=%s, reporter_id=%s)",
         radiod_block.get("status", "<unconfigured>"), config_path,
-        reporter_id or "<derived from radiod_id at row time>",
+        reporter_id or "<none: legacy shared config>",
     )
 
     recorder = HfdlRecorder(config, radiod_block, reporter_id=reporter_id)
     recorder.run()
+
+
+def _unescape(name):
+    """%i keeps systemd's spelling (AC0G\\x3dB1A); read it as the name."""
+    if not name:
+        return name
+    from hfdl_recorder._reporter_id import unescape_systemd_instance
+    return unescape_systemd_instance(name)
+
+
+def _instance_block(config, config_path, radiod_id, instance, reporter_id):
+    """The [[radiod]] block this instance records.
+
+    A per-receiver config (its [instance] block names a reporter) holds that
+    receiver's one radiod block; the unit's --radiod-id %i carries the
+    reporter key (AC0G-B1A), not a radiod, and selects nothing.  The block
+    comes from the file, never synthesized from /etc/radio: a radiod named
+    like the key must not replace the file's bands.  A legacy shared config
+    keeps strict matching on --radiod-id (hfdl-recorder@<radiod>)."""
+    from hfdl_recorder.config import resolve_radiod_block
+    if reporter_id:
+        blocks = config.get("radiod", [])
+        if isinstance(blocks, dict):
+            blocks = [blocks]
+        named = [b for b in blocks if b.get("status") == radiod_id]
+        if named:
+            return named[0]
+        if len(blocks) == 1:
+            return blocks[0]
+        raise ValueError(
+            f"{config_path} names reporter {reporter_id} but holds "
+            f"{len(blocks)} [[radiod]] blocks; a receiver has one radiod")
+    try:
+        return resolve_radiod_block(config, radiod_id)
+    except ValueError:
+        # A per-instance file without an [instance] block, started by a
+        # reporter-keyed unit: take its one block.  A legacy shared config
+        # started without --instance keeps strict matching.
+        if radiod_id is None or instance is None:
+            raise
+        logging.getLogger("hfdl_recorder.daemon").warning(
+            "--radiod-id=%r did not resolve in %s (--instance=%r); using "
+            "its single block.  Give the file an [instance] reporter_id.",
+            radiod_id, config_path, instance,
+        )
+        return resolve_radiod_block(config, None)
+
+
+def _squitter_radiod_id(args) -> Optional[str]:
+    """The radiod whose windows to analyse: the window keeper files them
+    under the radiod's status name.  For a per-receiver config that is its
+    block's status (the unit's --radiod-id %i is the reporter key, which
+    names no window directory); otherwise --radiod-id as given."""
+    from hfdl_recorder.config import (
+        extract_reporter_id, load_config, resolve_config_path,
+        resolve_radiod_status,
+    )
+    import warnings
+    radiod_id = _unescape(args.radiod_id)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        path = resolve_config_path(instance=_unescape(args.instance),
+                                   explicit_path=args.config)
+    try:
+        config = load_config(path)
+    except FileNotFoundError:
+        return radiod_id
+    reporter_id = extract_reporter_id(config)
+    if not reporter_id:
+        return radiod_id
+    try:
+        block = _instance_block(config, path, radiod_id, args.instance,
+                                reporter_id)
+        return resolve_radiod_status(block)
+    except ValueError as exc:
+        # No single radiod in the file: analyse as asked, and say why.
+        logging.warning("squitter-analyze: %s; using --radiod-id %r",
+                        exc, radiod_id)
+        return radiod_id
 
 
 def _handle_status(args):

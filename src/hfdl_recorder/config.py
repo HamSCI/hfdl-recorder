@@ -12,6 +12,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore[no-redef]
 
+from hfdl_recorder._reporter_id import to_key, unescape_systemd_instance
 from hfdl_recorder.bands import HFDL_BANDS, HfdlBand
 
 
@@ -36,7 +37,7 @@ def resolve_config_path(
     if env_override:
         return Path(env_override)
     if instance:
-        per_instance = PER_INSTANCE_CONFIG_DIR / f"{instance}.toml"
+        per_instance = per_instance_config_path(instance)
         if per_instance.exists():
             return per_instance
         warnings.warn(
@@ -48,6 +49,66 @@ def resolve_config_path(
             stacklevel=2,
         )
     return DEFAULT_CONFIG_PATH
+
+
+def per_instance_config_path(instance: str,
+                             config_dir: Optional[Path] = None) -> Path:
+    """The per-instance file for ``instance``: <dir>/<instance>.toml.
+
+    The unit passes %i, which keeps systemd's spelling; a reporter-keyed
+    instance (AC0G-B1A, or the older AC0G\\x3dB1A) names the file by its
+    key, the way sigmond writes it (AC0G-B1A.toml).  A radiod-keyed name
+    (bee1-status.local) is used as it stands."""
+    base = Path(config_dir) if config_dir is not None else PER_INSTANCE_CONFIG_DIR
+    name = unescape_systemd_instance(instance)
+    if is_reporter_instance(name):
+        name = to_key(name)
+    return base / f"{name}.toml"
+
+
+def is_reporter_instance(name: Optional[str]) -> bool:
+    """True when an instance name is a reporter key (AC0G-B1A), not a
+    radiod status name (bee1-status.local, my-rx888).  Reporter ids are
+    upper case only; radiod names are lower case mDNS names, so a name that
+    is not already upper case is a radiod's, never a reporter's."""
+    if not name:
+        return False
+    raw = unescape_systemd_instance(name.strip())
+    if raw != raw.upper():
+        return False
+    try:
+        to_key(raw)
+    except ValueError:
+        return False
+    return True
+
+
+def per_instance_config_paths(config_dir: Optional[Path] = None) -> list[Path]:
+    """Every per-receiver config in the config dir: a *.toml other than the
+    legacy shared file whose [instance] block names a reporter_id.  Sorted by
+    name.  Unreadable files are skipped."""
+    base = Path(config_dir) if config_dir is not None else PER_INSTANCE_CONFIG_DIR
+    try:
+        candidates = sorted(base.glob("*.toml"))
+    except OSError:
+        return []
+    out = []
+    for path in candidates:
+        if path.name == DEFAULT_CONFIG_PATH.name:
+            continue
+        try:
+            if extract_reporter_id(path):
+                out.append(path)
+        except OSError:
+            continue
+    return out
+
+
+def per_instance_names_from_dir(config_dir: Optional[str] = None) -> list[str]:
+    """The instance keys of every per-receiver config (install.sh): the
+    file stems, AC0G-B1A for AC0G-B1A.toml."""
+    return [p.stem for p in per_instance_config_paths(
+        Path(config_dir) if config_dir else None)]
 
 
 def extract_reporter_id(config_or_path) -> Optional[str]:

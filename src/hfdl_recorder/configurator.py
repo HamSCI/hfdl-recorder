@@ -44,6 +44,14 @@ def _find_template() -> Optional[Path]:
 # ---------------------------------------------------------------------------
 
 def cmd_config_init(args) -> int:
+    try:
+        inst = _instance_init(args)
+    except ValueError as exc:
+        _err(f"config init refused: {exc}")
+        return 1
+    if inst is not None and not getattr(args, "config", None):
+        from .config import PER_INSTANCE_CONFIG_DIR
+        args.config = PER_INSTANCE_CONFIG_DIR / f"{inst[0]}.toml"
     target = _resolve_target(args)
     if target.exists() and not getattr(args, "reconfig", False):
         if not _is_unconfigured(target):
@@ -62,8 +70,11 @@ def cmd_config_init(args) -> int:
         return 1
 
     body = template.read_text()
-    values = _collect_init_values(args)
+    values = _collect_init_values(
+        args, radiod_status=inst[2] if inst is not None else None)
     body = _apply_init_substitutions(body, values)
+    if inst is not None:
+        body = _instance_header(inst[1]) + body
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(body)
@@ -76,8 +87,11 @@ def cmd_config_init(args) -> int:
     _info("  2. Optional: to feed airframes.io, register a station at "
           "https://app.airframes.io and set [sinks] airframes_station_id")
     _info(f"  3. Validate: hfdl-recorder validate --json")
+    unit_instance = inst[0] if inst is not None else values['radiod_status']
+    if inst is not None:
+        _info(f"reporter:   {inst[1]}")
     _info(f"  4. Start:    sudo systemctl enable --now "
-          f"hfdl-recorder@{values['radiod_status']}.service")
+          f"hfdl-recorder@{unit_instance}.service")
     return 0
 
 
@@ -135,7 +149,79 @@ def cmd_config_edit(args) -> int:
 # ---------------------------------------------------------------------------
 
 def _resolve_target(args) -> Path:
-    return Path(getattr(args, "config", None) or DEFAULT_CONFIG_PATH)
+    """--config, else the --instance file (a reporter-keyed instance, or
+    one whose file exists), else the legacy shared config."""
+    if getattr(args, "config", None):
+        return Path(args.config)
+    instance = getattr(args, "instance", None)
+    if not instance:
+        # sigmond names the instance in the env (smd config edit <client>
+        # <instance>); only an existing per-receiver file takes it, so a
+        # station on the shared config is untouched.
+        env_instance = os.environ.get("SIGMOND_INSTANCE", "").strip()
+        if env_instance:
+            from .config import per_instance_config_path as _pic
+            if _pic(env_instance).exists():
+                instance = env_instance
+    if instance:
+        from .config import is_reporter_instance, per_instance_config_path
+        path = per_instance_config_path(instance)
+        if is_reporter_instance(instance) or path.exists():
+            return path
+    return DEFAULT_CONFIG_PATH
+
+
+def _instance_init(args):
+    """The receiver this init configures, or None for the shared config.
+
+    An instance keyed by reporter (``--instance``, else ``SIGMOND_INSTANCE``;
+    AC0G-B1A) gets its own file, /etc/hfdl-recorder/<key>.toml, holding
+    ``[instance] reporter_id`` and that receiver's one [[radiod]] block
+    (tasks/transporter-reporters/2026-11-18-design.md).  A radiod-keyed
+    instance (bee1-status.local) or none keeps the legacy shared config.
+
+    Returns (key, reporter_id, radiod_status) or None; raises ValueError
+    when the receiver's reporter or radiod is unknown.  The reporter is
+    ``--reporter-id``, else ``STATION_REPORTER_ID`` when its key is this
+    instance's (a single-receiver station).  On a transporter the station's
+    reporter names the sender, not this receiver, so it never stands in for
+    another key.  The radiod is ``--radiod-status``, else
+    ``SIGMOND_RADIOD_STATUS``."""
+    from ._reporter_id import display, to_key, to_storage
+    from .config import is_reporter_instance
+    instance = (getattr(args, "instance", None)
+                or os.environ.get("SIGMOND_INSTANCE", "")).strip()
+    if not is_reporter_instance(instance):
+        return None
+    key = to_key(instance)
+    rid = (getattr(args, "reporter_id", None) or "").strip()
+    if not rid:
+        station = os.environ.get("STATION_REPORTER_ID", "").strip()
+        try:
+            if station and to_key(station) == key:
+                rid = station
+        except ValueError:
+            pass
+    if not rid:
+        raise ValueError(
+            f"instance {key}: no reporter id for this receiver; pass "
+            f"--reporter-id (STATION_REPORTER_ID names another key)")
+    if to_key(rid) != key:
+        raise ValueError(f"reporter {rid!r} has key {to_key(rid)}, "
+                         f"not this instance's {key}")
+    status = (getattr(args, "radiod_status", None)
+              or os.environ.get("SIGMOND_RADIOD_STATUS", "")).strip()
+    if not status:
+        raise ValueError(
+            f"instance {key}: no radiod for this receiver; pass "
+            f"--radiod-status or set SIGMOND_RADIOD_STATUS")
+    return key, display(to_storage(rid)), status
+
+
+def _instance_header(reporter_id: str) -> str:
+    """The [instance] table a per-receiver file opens with."""
+    escaped = reporter_id.replace("\\", "\\\\").replace('"', '\\"')
+    return f'[instance]\nreporter_id = "{escaped}"\n\n'
 
 
 def _default_station_id() -> str:
@@ -254,10 +340,14 @@ def _sigmond_radiods(env=None, coordination_env: Optional[Path] = None) -> list:
     return sorted({v.strip().strip('"') for v in pairs.values() if v.strip()})
 
 
-def _collect_init_values(args) -> dict:
+def _collect_init_values(args, radiod_status: Optional[str] = None) -> dict:
+    """``radiod_status`` names one receiver's radiod (a per-receiver init):
+    it is the only radiod written, and nothing is discovered or asked."""
     grid = os.environ.get("STATION_GRID", "")
     instance = os.environ.get("SIGMOND_INSTANCE", "")
     status = os.environ.get("SIGMOND_RADIOD_STATUS", "")
+    if radiod_status:
+        status = radiod_status
     default_station = _default_station_id() or "YOURCALL-1"
     # sigmond sets SIGMOND_RADIOD_COUNT on every config init it drives.  Its
     # stations all send squitter timing to sigmondb (Michael, 2026-11-12), so
@@ -294,10 +384,11 @@ def _collect_init_values(args) -> dict:
                           default_station, required=True)
     grid_square = _prompt("Grid square", grid, required=True)
 
-    # RADIOD-IDENTIFICATION.md §4 — discovery-driven radiod selection.
-    discovered = _discover_radiods()
-    radiod_status = _pick_radiod_status_from_discovery(
-        discovered, status, instance)
+    if not radiod_status:
+        # RADIOD-IDENTIFICATION.md §4 — discovery-driven radiod selection.
+        discovered = _discover_radiods()
+        radiod_status = _pick_radiod_status_from_discovery(
+            discovered, status, instance)
 
     return {
         "station_id":    station_id,
@@ -373,6 +464,10 @@ def _select_radiod_block(blocks: list[dict], args) -> tuple:
 
     target_id = os.environ.get("SIGMOND_INSTANCE", "") or \
                 getattr(args, "radiod_id", None)
+    # A reporter key names a per-receiver file, which holds its one radiod.
+    from .config import is_reporter_instance
+    if is_reporter_instance(target_id) and len(blocks) == 1:
+        target_id = None
 
     if target_id:
         for i, b in enumerate(blocks):
@@ -520,7 +615,7 @@ _APPLY_ALLOWED_SECTIONS = {
 
 def cmd_config_show(args) -> int:
     """Emit the on-disk TOML (or DEFAULTS-merged) as JSON on stdout."""
-    config_path = Path(getattr(args, "config", None) or DEFAULT_CONFIG_PATH)
+    config_path = _resolve_target(args)
     if getattr(args, "defaults", False):
         # DEFAULTS as the base, then the file's content overlays it.
         # Sigmond's wizard uses this on first-run / freshly-installed
@@ -560,7 +655,7 @@ def cmd_config_apply(args) -> int:
     a table, except `radiod` which is a list of tables).  No per-key
     type enforcement — sigmond's wizard owns input typing on its end.
     """
-    config_path = Path(getattr(args, "config", None) or DEFAULT_CONFIG_PATH)
+    config_path = _resolve_target(args)
 
     try:
         payload = json.load(sys.stdin)

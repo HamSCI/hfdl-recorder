@@ -1,5 +1,5 @@
 [Unit]
-Description=hfdl-recorder HFDL recorder for radiod %i
+Description=hfdl-recorder HFDL recorder for %i
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300
@@ -23,14 +23,17 @@ ExecStartPre=+/bin/mkdir -p /var/log/hfdl-recorder
 ExecStartPre=+/usr/bin/chown -R hfdlrec:hfdlrec /var/lib/hfdl-recorder/%i
 ExecStartPre=+/usr/bin/chown -R hfdlrec:hfdlrec /var/log/hfdl-recorder
 
-# Phase-5 cutover (sigmond MULTI-INSTANCE-ARCHITECTURE.md):
-# --instance %i picks up /etc/hfdl-recorder/%i.toml when the operator
-# has run `sudo smd instance migrate` (Phase 8).  Until then the
-# per-instance config doesn't exist and the daemon falls back to the
-# legacy /etc/hfdl-recorder/hfdl-recorder-config.toml with a one-line
-# deprecation warning.  --radiod-id %i stays for the legacy fallback
-# path; --config is intentionally omitted (explicit_path wins in
-# resolve_config_path, which would force the legacy path forever).
+# %i names the instance.  Per receiver it is the reporter key (AC0G-B1A):
+# --instance %i reads /etc/hfdl-recorder/AC0G-B1A.toml, whose [instance]
+# reporter_id names the squitter rows and whose one [[radiod]] block names
+# that receiver's radiod; --radiod-id %i then matches no block and is
+# ignored.  On a station not yet migrated, %i is a radiod status name, no
+# per-instance file exists, and the daemon reads the legacy shared
+# /etc/hfdl-recorder/hfdl-recorder-config.toml (with a DeprecationWarning),
+# where --radiod-id %i picks that radiod's block.  --config is omitted on
+# purpose: it would win over the per-instance file.
+# (/var/lib/hfdl-recorder/%i above: an empty directory for a reporter key;
+# the spool stays keyed by radiod.)
 ExecStart=/opt/git/sigmond/hfdl-recorder/venv/bin/python3 -m hfdl_recorder.cli daemon \
     --instance %i \
     --radiod-id %i

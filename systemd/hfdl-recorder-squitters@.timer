@@ -1,5 +1,5 @@
 [Unit]
-Description=Run hfdl-recorder squitter timing analysis for radiod %i every 15 minutes
+Description=Run hfdl-recorder squitter timing analysis for %i every 15 minutes
 
 [Timer]
 OnBootSec=10min

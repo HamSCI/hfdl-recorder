@@ -127,7 +127,7 @@ tests/
 config/
   hfdl-recorder-config.toml.template
 systemd/
-  hfdl-recorder@.service              # Template unit; %i = radiod_id
+  hfdl-recorder@.service              # Template unit; %i = reporter key (legacy: radiod_id)
   hfdl-recorder-squitters@.service    # oneshot squitter-analyze (not enabled by default)
   hfdl-recorder-squitters@.timer      # every 15 min, once enabled
 scripts/
@@ -139,8 +139,9 @@ deploy.toml           # Sigmond deploy manifest
 
 ## Key Design Decisions
 
-- **One systemd instance per radiod** (`hfdl-recorder@<radiod_id>.service`),
-  matching `psk-recorder` / `wspr-recorder`. The Python daemon supervises
+- **One systemd instance per receiver** (`hfdl-recorder@<reporter key>`,
+  below), or per radiod on a station still on the shared config
+  (`hfdl-recorder@<radiod_id>`), matching `psk-recorder` / `wspr-recorder`. The Python daemon supervises
   one `dumphfdl` subprocess per enabled band.
 - **Python is in the IQ data path**, but only as a thin float32→CF32
   forwarder via numpy. Matches `wspr-recorder` symmetry (no `pcmrecord`
@@ -212,7 +213,8 @@ Sections implemented:
 
 ## Production Paths
 
-- Config: `/etc/hfdl-recorder/hfdl-recorder-config.toml`
+- Config: `/etc/hfdl-recorder/<reporter key>.toml` per receiver; legacy shared
+  `/etc/hfdl-recorder/hfdl-recorder-config.toml`
 - JSON spool: `/var/lib/hfdl-recorder/<radiod_id>/<BAND>.json`
 - systable: `/var/lib/hfdl-recorder/systable.conf` (auto-updated)
 - Per-band logs: `/var/log/hfdl-recorder/<radiod_id>-<BAND>.log` (dumphfdl stderr)
@@ -248,21 +250,41 @@ uv run pytest tests/test_band_pipeline.py::TestX::testY  # one test
 uv run pytest -k contract -v                          # by keyword
 ```
 
-## Per-instance cutover (Phase 5 of sigmond multi-instance architecture)
+## One instance per receiver, keyed by reporter (2026-11-18)
 
-The systemd unit (`hfdl-recorder@%i.service`) now passes `--instance %i`
-to the daemon (alongside `--radiod-id %i`).
-`config.resolve_config_path()` prefers `/etc/hfdl-recorder/<instance>.toml`
-when it exists; otherwise falls back to the legacy shared
-`hfdl-recorder-config.toml` with a one-line `DeprecationWarning`.
+A receiver (antenna + RX888 + radiod) names every row it produces; a
+transporter that runs hfdl-recorder for receivers on another machine
+(AC0G-B2 for B1A/B1B, KFS-MAIN) only sends the upload
+(`~/hamsci/tasks/transporter-reporters/2026-11-18-design.md`).  So such a
+station runs one instance per receiver:
 
-Until operators run `sudo smd instance migrate` (sigmond Phase 8),
-existing deployments keep running unchanged.
+- Units `hfdl-recorder@AC0G-B1A` and, with squitter timing on,
+  `hfdl-recorder-squitters@AC0G-B1A.timer` (the reporter key: `/` and `=`
+  become `-`).  Both pass `--instance %i --radiod-id %i`.
+- Config `/etc/hfdl-recorder/AC0G-B1A.toml`: `[instance] reporter_id =
+  "AC0G/B1A"` plus the full config and that receiver's one `[[radiod]]`
+  block (`status` = its radiod).  The daemon takes the file's block and
+  never synthesizes one from `/etc/radio`; `--radiod-id AC0G-B1A` matches
+  nothing and is ignored.  `squitter-analyze` replaces it with the block's
+  status, the name the window keeper files windows under.
+- Env file `/etc/hfdl-recorder/env/AC0G-B1A.env` (optional).
+- Squitter timing rows (`squitter_timing`, sigmondb arrival/capture) carry
+  `AC0G/B1A`.  Spool, logs and windows stay keyed by radiod.
+- `hfdl-recorder config init --non-interactive --instance AC0G-B1A
+  --reporter-id AC0G/B1A --radiod-status <radiod>` writes that file (env
+  fallbacks: `SIGMOND_INSTANCE`, `STATION_REPORTER_ID` only when its key is
+  the instance's, `SIGMOND_RADIOD_STATUS`).  It refuses rather than guess
+  the receiver's reporter or radiod.
+- `inventory`/`validate` take `--instance`; with no shared config they
+  report every per-receiver file (`config_paths`).  An instance's
+  `instance` field is its unit key; it also names its `reporter_id`.
+- `install.sh` renders no shared config once per-receiver files exist, and
+  enables only their reporter-keyed instances.
 
-Spot rows now carry a first-class `reporter_id` field — falls back to
-`radiod_id` (matching the existing `instance` field) for legacy
-deployments; set explicitly via the `[instance]` block in a per-
-instance config post-migration.
+Legacy, until sigmond migrates a station: `hfdl-recorder@<radiod status>`
+reads the shared `hfdl-recorder-config.toml` (a `DeprecationWarning`); its
+squitter rows keep an empty reporter, which the server files under the
+uploading site.
 
 See `/opt/git/sigmond/sigmond/docs/MULTI-INSTANCE-ARCHITECTURE.md`
 for the architecture and phase plan.

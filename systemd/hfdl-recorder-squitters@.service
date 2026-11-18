@@ -1,5 +1,5 @@
 [Unit]
-Description=hfdl-recorder squitter timing batch analysis for radiod %i
+Description=hfdl-recorder squitter timing batch analysis for %i
 After=local-fs.target
 
 [Service]
@@ -17,6 +17,10 @@ WorkingDirectory=/opt/git/sigmond/hfdl-recorder
 # as the daemon resolves it (--instance %i), so the two never disagree.  It
 # must lie under /var/lib/hfdl-recorder, the only window path both units
 # may write.  Exit status 1 means the run stopped on its store.
+# For a per-receiver instance (%i = AC0G-B1A) the config's [instance]
+# reporter_id names the rows and its radiod block's status picks the window
+# subdirectory; --radiod-id %i (the reporter key) names none and is
+# replaced.  On the legacy shared config %i is the radiod and is used as is.
 ExecStart=/opt/git/sigmond/hfdl-recorder/venv/bin/python3 -m hfdl_recorder.cli squitter-analyze \
     --instance %i \
     --radiod-id %i \
